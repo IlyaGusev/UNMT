@@ -9,9 +9,8 @@ class Vocabulary:
         self.word2index = {}
         self.word2count = Counter()
         self.index2word = ["<pad>", "</b>", "</s>", "<unk>"]
-        self.path = path
         if os.path.exists(path):
-            self.load()
+            self.load(path)
 
     def get_pad(self):
         return self.index2word.index("<pad>")
@@ -96,12 +95,12 @@ class Vocabulary:
         self.word2count = Counter()
         self.index2word = ["<pad>", "</b>", "</s>", "<unk>"]
 
-    def save(self) -> None:
-        with open(self.path, "wb") as f:
+    def save(self, path) -> None:
+        with open(path, "wb") as f:
             pickle.dump(self, f, pickle.HIGHEST_PROTOCOL)
 
-    def load(self):
-        with open(self.path, "rb") as f:
+    def load(self, path):
+        with open(path, "rb") as f:
             vocab = pickle.load(f)
             self.__dict__.update(vocab.__dict__)
 

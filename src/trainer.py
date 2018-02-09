@@ -51,19 +51,19 @@ class Trainer:
             for filename in src_filenames:
                 self.src_vocabulary = self.add_filename_to_vocabulary(filename, self.src_vocabulary)
             self.src_vocabulary.shrink(src_max_words)
-            self.src_vocabulary.save()
+            self.src_vocabulary.save(src_vocabulary_path)
         assert self.src_vocabulary.size() > 4
 
         if self.tgt_vocabulary.is_empty():
             for filename in tgt_filenames:
                 self.tgt_vocabulary = self.add_filename_to_vocabulary(filename, self.tgt_vocabulary)
             self.tgt_vocabulary.shrink(tgt_max_words)
-            self.tgt_vocabulary.save()
+            self.tgt_vocabulary.save(tgt_vocabulary_path)
         assert self.tgt_vocabulary.size() > 4
 
         if self.all_vocabulary.is_empty():
             self.all_vocabulary = Vocabulary.merge(self.src_vocabulary, self.tgt_vocabulary, all_vocabulary_path)
-            self.all_vocabulary.save()
+            self.all_vocabulary.save(all_vocabulary_path)
         assert self.all_vocabulary.size() == self.src_vocabulary.size() + self.tgt_vocabulary.size() - 1
 
     def init_criterions(self):
