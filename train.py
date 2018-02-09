@@ -1,5 +1,6 @@
 import argparse
 
+import time
 import torch
 from src.trainer import Trainer
 from src.translator import Translator
@@ -49,6 +50,8 @@ def train_opts(parser):
                        help='Pretrained word embeddings for src language.')
     group.add_argument('-tgt_to_src_dict', type=str, default=None,
                        help='Pretrained word embeddings for tgt language.')
+    group.add_argument('-bootstrapped_model', type=str, default=None,
+                       help='Pretrained model used to bootstrap unsupervised learning process.')
 
     # Encoder-Decoder Options
     group = parser.add_argument_group('Model-Encoder-Decoder')
@@ -123,14 +126,69 @@ train_opts(parser)
 opt = parser.parse_args()
 
 
+def zero_model(state, use_cuda, print_every=1000, save_every=1000, save_file: str="model"):
+    if opt.src_to_tgt_dict is not None and opt.tgt_to_src_dict is not None:
+        state.current_translation_model = state.build_word_by_word_model(src_to_tgt_dict_filename=opt.src_to_tgt_dict,                                                                         tgt_to_src_dict_filename=opt.tgt_to_src_dict)
+
+    elif opt.bootstrapped_model is not None:
+        state.load(opt.bootstrapped_model)
+        state.model = state.model.cuda() if use_cuda else state.model
+        state.current_translation_model = state.model
+        for param in state.current_translation_model.parameters():
+            param.requires_grad = False
+        state.load(opt.bootstrapped_model)
+        state.model = state.model.cuda() if use_cuda else state.model
+
+    elif opt.train_src_bi is not None and opt.train_tgt_bi is not None:
+        batch_size = opt.batch_size
+        n_supervised_batches = opt.n_supervised_batches
+        pair_filenames = [(opt.train_src_bi, opt.train_tgt_bi), ]
+        supervised_big_epochs = opt.supervised_epochs
+
+        parallel_forward_batches = state.get_bilingual_batches(pair_filenames, lang="src",
+                                                               batch_size=batch_size, n=n_supervised_batches)
+        reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
+        reverted_batches = state.get_bilingual_batches(reverted_pairs, lang="tgt",
+                                                       batch_size=batch_size, n=n_supervised_batches)
+        count_supervised_batches = len(parallel_forward_batches)
+
+        src_batches = state.get_one_lang_batches([opt.train_src_bi, ], lang="src",
+                                                 batch_size=batch_size, n=n_supervised_batches)
+        tgt_batches = state.get_one_lang_batches([opt.train_tgt_bi, ], lang="tgt",
+                                                 batch_size=batch_size, n=n_supervised_batches)
+
+        print("Src batch:", src_batches[0])
+        print("Tgt batch:", tgt_batches[0])
+
+        for big_epoch in range(supervised_big_epochs):
+            timer = time.time()
+            print_loss_total = 0
+            for epoch, batch in enumerate(parallel_forward_batches):
+                state.model.train()
+                loss = state.train_bilingual_batch(batch, reverted_batches[epoch])
+
+                print_loss_total += loss
+                if epoch % save_every == 0 and epoch != 0:
+                    state.save(save_file + "_supervised.pt")
+                if epoch % print_every == 0 and epoch != 0:
+                    print_loss_avg = print_loss_total / print_every
+                    print_loss_total = 0
+                    diff = time.time() - timer
+                    timer = time.time()
+                    print('%s big epoch, %s/%s epoch, %s sec, %.4f main loss' %
+                          (big_epoch, epoch, count_supervised_batches, diff, print_loss_avg))
+            state.save(save_file + "_supervised.pt")
+        state.current_translation_model = state.model
+
+    raise ValueError('Zero Model was not initialized')
+
+
 def main():
     use_cuda = torch.cuda.is_available()
     print("Use CUDA: ", use_cuda)
     state = Trainer(opt.src_lang, opt.tgt_lang, use_cuda=use_cuda)
     state.init_model(src_filenames=[opt.train_src_mono, ],
                      tgt_filenames=[opt.train_tgt_mono, ],
-                     src_to_tgt_dict_filename=opt.src_to_tgt_dict,
-                     tgt_to_src_dict_filename=opt.tgt_to_src_dict,
                      src_embeddings_filename=opt.src_embeddings,
                      tgt_embeddings_filename=opt.tgt_embeddings,
                      src_max_words=opt.src_vocab_size,
@@ -146,27 +204,19 @@ def main():
                      all_vocabulary_path=opt.all_vocabulary,
                      enable_embedding_training=opt.enable_embedding_training)
 
-    state.load("model_supervised.pt")
-    state.model = state.model.cuda() if use_cuda else state.model
-    state.current_translation_model = state.model
-    for param in state.current_translation_model.parameters():
-        param.requires_grad = False
-    state.load("model_supervised.pt")
-    state.model = state.model.cuda() if use_cuda else state.model
+    # Init Zero Model
+    zero_model(state, use_cuda)
 
     print(Translator.translate(state.model, "you can prepare your meals here .", "src", "tgt",
                                state.all_vocabulary, state.use_cuda))
 
     state.train([opt.train_src_mono, ], [opt.train_tgt_mono, ],
-            [(opt.train_src_bi, opt.train_tgt_bi), ],
-            supervised_big_epochs=opt.supervised_epochs,
-            unsupervised_big_epochs=opt.unsupervised_epochs,
-            batch_size=opt.batch_size,
-            print_every=opt.print_every,
-            save_every=opt.save_every,
-            save_file=opt.save_model,
-            n_unsupervised_batches=opt.n_unsupervised_batches,
-            n_supervised_batches=opt.n_supervised_batches)
+                unsupervised_big_epochs=opt.unsupervised_epochs,
+                batch_size=opt.batch_size,
+                print_every=opt.print_every,
+                save_every=opt.save_every,
+                save_file=opt.save_model,
+                n_unsupervised_batches=opt.n_unsupervised_batches)
 
 
 if __name__ == "__main__":
