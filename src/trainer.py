@@ -142,12 +142,11 @@ class Trainer:
               unsupervised_big_epochs: int, print_every=1000, save_every=1000,
               batch_size: int=32, n_unsupervised_batches: int=None, save_file: str="model",
               enable_unsupervised_backtranslation=False):
-        src_batches = self.get_one_lang_batches(src_filenames, "src", batch_size, n=n_unsupervised_batches)
-        tgt_batches = self.get_one_lang_batches(tgt_filenames, "tgt", batch_size, n=n_unsupervised_batches)
-        print("Src batch:", next(src_batches))
-        print("Tgt batch:", next(tgt_batches))
-
         for big_epoch in range(unsupervised_big_epochs):
+            src_batches = self.get_one_lang_batches(src_filenames, "src", batch_size, n=n_unsupervised_batches)
+            tgt_batches = self.get_one_lang_batches(tgt_filenames, "tgt", batch_size, n=n_unsupervised_batches)
+            print("Src batch:", next(src_batches))
+            print("Tgt batch:", next(tgt_batches))
             timer = time.time()
             print_main_loss_total = 0
             print_discriminator_loss_total = 0

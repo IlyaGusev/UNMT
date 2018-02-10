@@ -139,11 +139,10 @@ def init_zero_model(state, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=None,
     elif train_src_bi is not None and train_tgt_bi is not None:
         pair_filenames = [(train_src_bi, train_tgt_bi), ]
         reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
-
-        parallel_forward_batches = state.get_bilingual_batches(pair_filenames, "src", batch_size, n=n_supervised_batches)
-        reverted_batches = state.get_bilingual_batches(reverted_pairs, "tgt", batch_size, n=n_supervised_batches)
-
         for big_epoch in range(supervised_epochs):
+            parallel_forward_batches = \
+                state.get_bilingual_batches(pair_filenames, "src", batch_size, n=n_supervised_batches)
+            reverted_batches = state.get_bilingual_batches(reverted_pairs, "tgt", batch_size, n=n_supervised_batches)
             timer = time.time()
             print_loss_total = 0
             epoch = 0
