@@ -95,32 +95,32 @@ class UNMT(nn.Module):
         src_adv_loss, src_auto_loss = \
             self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
                                      src_noisy_batch.variable, src_noisy_batch.lengths,
-                                     src_batch_.variable, src_batch_.lengths, batch_size, adv_ones_variable,
+                                     src_batch_.variable, src_batch_.lengths,  adv_ones_variable,
                                      self.all_vocabulary.get_lang_sos("src"))
 
         tgt_adv_loss, tgt_auto_loss = \
             self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
                                      tgt_noisy_batch.variable, tgt_noisy_batch.lengths,
-                                     tgt_batch_.variable, tgt_batch_.lengths, batch_size, adv_zeros_variable,
+                                     tgt_batch_.variable, tgt_batch_.lengths,  adv_zeros_variable,
                                      self.all_vocabulary.get_lang_sos("tgt"))
         
         cd_src_adv_loss, cd_src_cd_loss = \
             self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
                                      src_translated_noisy_batch.variable, src_translated_noisy_batch.lengths,
-                                     src_batch__.variable, src_batch__.lengths, batch_size, adv_zeros_variable,
+                                     src_batch__.variable, src_batch__.lengths,  adv_zeros_variable,
                                      self.all_vocabulary.get_lang_sos("src"))
         
         cd_tgt_adv_loss, cd_tgt_cd_loss = \
             self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
                                      tgt_translated_noisy_batch.variable, tgt_translated_noisy_batch.lengths,
-                                     tgt_batch__.variable, tgt_batch__.lengths, batch_size, adv_ones_variable,
+                                     tgt_batch__.variable, tgt_batch__.lengths,adv_ones_variable,
                                      self.all_vocabulary.get_lang_sos("tgt"))
 
         return [src_adv_loss, tgt_adv_loss, cd_tgt_adv_loss, cd_src_adv_loss, 
                 src_auto_loss, tgt_auto_loss, cd_src_cd_loss, cd_tgt_cd_loss]
 
     def encoder_decoder_run(self, encoder, decoder, generator, criterion, variable, lengths,
-                            gt_variable, gt_lengths, batch_size, adv_variable, sos_index):
+                            gt_variable, gt_lengths, adv_variable, sos_index):
         encoder_output, encoder_hidden = encoder(variable, lengths, None)
 
         adv_loss = 0

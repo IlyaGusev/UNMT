@@ -21,6 +21,8 @@ def train_opts(parser):
                        help="Path to tgt vocab")
     group.add_argument('-all_vocabulary', default="all.pickle",
                        help="Path to all vocab")
+    group.add_argument('-reset_vocabularies', type=int, default=1,
+                       help="Reset all vocabularies")
     group.add_argument('-train_src_mono', required=True,
                        help="Path to the training source monolingual data")
     group.add_argument('-train_tgt_mono', required=True,
@@ -33,6 +35,8 @@ def train_opts(parser):
                        help="Count of src/tgt batches to process")
     group.add_argument('-n_supervised_batches', type=int, default=None,
                        help="Count of parallel/reverted batches to process")
+    group.add_argument('-enable_unsupervised_backtranslation', type=bool, default=False,
+                       help="Enable unsupervised backtranslation")
 
     # Embedding Options
     group = parser.add_argument_group('Embeddings')
@@ -77,15 +81,8 @@ def train_opts(parser):
     group.add_argument('-seed', type=int, default=1337,
                        help="""Random seed used for the experiments
                        reproducibility.""")
-
-    # Init options
-    # group = parser.add_argument_group('Initialization')
-    # group.add_argument('-start_epoch', type=int, default=1,
-    #                    help='The epoch from which to start')
-    # group.add_argument('-train_from', default='', type=str,
-    #                    help="""If training from a checkpoint then this is the
-    #                    path to the pretrained model's state_dict.""")
-
+    group.add_argument('-load_from', default=None, type=str,
+                       help="Load from file")
     # Logging
     group = parser.add_argument_group('Logging')
     group.add_argument('-print_every', type=int, default=1000,
@@ -110,7 +107,7 @@ def train_opts(parser):
     group = parser.add_argument_group('Optimization- Rate')
     group.add_argument('-learning_rate', type=float, default=0.0003,
                        help="""Main learning rate.""")
-    group.add_argument('-discr-learning_rate', type=float, default=0.0005,
+    group.add_argument('-discriminator_lr', type=float, default=0.0005,
                        help="""Discriminator learning rate""")
 
 
@@ -127,35 +124,43 @@ def main():
     use_cuda = torch.cuda.is_available()
     print("Use CUDA: ", use_cuda)
     state = Trainer(opt.src_lang, opt.tgt_lang, use_cuda=use_cuda)
-    state.init_model(src_filenames=[opt.train_src_mono, ],
-                     tgt_filenames=[opt.train_tgt_mono, ],
-                     src_to_tgt_dict_filename=opt.src_to_tgt_dict,
-                     tgt_to_src_dict_filename=opt.tgt_to_src_dict,
-                     src_embeddings_filename=opt.src_embeddings,
-                     tgt_embeddings_filename=opt.tgt_embeddings,
-                     src_max_words=opt.src_vocab_size,
-                     tgt_max_words=opt.tgt_vocab_size,
-                     hidden_size=opt.rnn_size,
-                     n_layers=opt.layers,
-                     discriminator_lr=opt.discr_learning_rate,
-                     main_lr=opt.learning_rate,
-                     main_betas=(opt.adam_beta1, 0.999),
-                     discriminator_hidden_size=opt.discriminator_hidden_size,
-                     src_vocabulary_path=opt.src_vocabulary,
-                     tgt_vocabulary_path=opt.tgt_vocabulary,
-                     all_vocabulary_path=opt.all_vocabulary,
-                     enable_embedding_training=opt.enable_embedding_training)
-
-    state.load("model_supervised.pt")
-    state.model = state.model.cuda() if use_cuda else state.model
-    state.current_translation_model = state.model
-    for param in state.current_translation_model.parameters():
-        param.requires_grad = False
-    state.load("model_supervised.pt")
-    state.model = state.model.cuda() if use_cuda else state.model
-
-    print(Translator.translate(state.model, "you can prepare your meals here .", "src", "tgt",
-                               state.all_vocabulary, state.use_cuda))
+    if opt.load_from is None:
+        state.init_model(
+            src_filenames=[opt.train_src_mono, ],
+            tgt_filenames=[opt.train_tgt_mono, ],
+            src_to_tgt_dict_filename=opt.src_to_tgt_dict,
+            tgt_to_src_dict_filename=opt.tgt_to_src_dict,
+            src_embeddings_filename=opt.src_embeddings,
+            tgt_embeddings_filename=opt.tgt_embeddings,
+            src_max_words=opt.src_vocab_size,
+            tgt_max_words=opt.tgt_vocab_size,
+            hidden_size=opt.rnn_size,
+            n_layers=opt.layers,
+            discriminator_lr=opt.discriminator_lr,
+            main_lr=opt.learning_rate,
+            main_betas=(opt.adam_beta1, 0.999),
+            discriminator_hidden_size=opt.discriminator_hidden_size,
+            src_vocabulary_path=opt.src_vocabulary,
+            tgt_vocabulary_path=opt.tgt_vocabulary,
+            all_vocabulary_path=opt.all_vocabulary,
+            enable_embedding_training=opt.enable_embedding_training,
+            reset_vocabularies=bool(opt.reset_vocabularies))
+    else:
+        state.collect_vocabularies(
+            src_vocabulary_path=opt.src_vocabulary,
+            tgt_vocabulary_path=opt.tgt_vocabulary,
+            all_vocabulary_path=opt.all_vocabulary,
+            src_filenames=[opt.train_src_mono, ],
+            tgt_filenames=[opt.train_tgt_mono, ],
+            src_max_words=opt.src_vocab_size,
+            tgt_max_words=opt.tgt_vocab_size,
+            reset=bool(opt.reset_vocabularies))
+        state.init_criterions()
+        state.load(opt.load_from)
+        state.model = state.model.cuda() if use_cuda else state.model
+        if opt.src_to_tgt_dict is not None:
+            state.build_word_by_word_model(src_to_tgt_dict_filename=opt.src_to_tgt_dict,
+                                           tgt_to_src_dict_filename=opt.tgt_to_src_dict)
 
     state.train([opt.train_src_mono, ], [opt.train_tgt_mono, ],
             [(opt.train_src_bi, opt.train_tgt_bi), ],
@@ -166,7 +171,8 @@ def main():
             save_every=opt.save_every,
             save_file=opt.save_model,
             n_unsupervised_batches=opt.n_unsupervised_batches,
-            n_supervised_batches=opt.n_supervised_batches)
+            n_supervised_batches=opt.n_supervised_batches,
+            enable_unsupervised_backtranslation=opt.enable_unsupervised_backtranslation)
 
 
 if __name__ == "__main__":

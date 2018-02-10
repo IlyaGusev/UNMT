@@ -168,7 +168,6 @@ class AttnDecoderRNN(nn.Module):
         attn_weights = torch.add(attn_weights, 1.0 / max_encoder_length)
         attn_weights = attn_weights.cuda() if self.use_cuda else attn_weights
         initial_context = attn_weights.bmm(encoder_outputs.transpose(0, 1)).transpose(0, 1)  # S = 1 x B x N
-#         initial_context = Variable(torch.zeros(batch_size, self.hidden_size), requires_grad=False).unsqueeze(0)
         initial_context = initial_context.cuda() if self.use_cuda else initial_context
         initial_context = initial_context.detach()
 

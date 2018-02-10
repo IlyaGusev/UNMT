@@ -37,12 +37,13 @@ class Trainer:
         self.main_optimizer = None
 
     def collect_vocabularies(self, src_vocabulary_path: str, tgt_vocabulary_path: str, all_vocabulary_path: str,
-                             src_filenames=None, tgt_filenames=None, src_max_words=80000, tgt_max_words=100000):
+                             src_filenames=None, tgt_filenames=None, src_max_words=80000, tgt_max_words=100000,
+                             reset=True):
         print("Collecting vocabularies...")
         self.src_vocabulary = Vocabulary(language=self.src_lang, path=src_vocabulary_path)
         self.tgt_vocabulary = Vocabulary(language=self.tgt_lang, path=tgt_vocabulary_path)
         self.all_vocabulary = Vocabulary(language="all", path=all_vocabulary_path)
-        if src_filenames is not None:
+        if src_filenames is not None and reset:
             self.src_vocabulary.reset()
             self.tgt_vocabulary.reset()
             self.all_vocabulary.reset()
@@ -108,7 +109,8 @@ class Trainer:
                    src_max_words=80000, tgt_max_words=100000, hidden_size=200, n_layers=3, discriminator_lr=0.0005,
                    main_lr=0.0003, main_betas=(0.5, 0.999), discriminator_hidden_size=512,
                    src_vocabulary_path: str="src.pickle", tgt_vocabulary_path: str="tgt.pickle",
-                   all_vocabulary_path: str="all.pickle", enable_embedding_training=False):
+                   all_vocabulary_path: str="all.pickle", enable_embedding_training=False,
+                   reset_vocabularies=True):
 
         self.collect_vocabularies(src_vocabulary_path=src_vocabulary_path,
                                   tgt_vocabulary_path=tgt_vocabulary_path,
@@ -116,7 +118,8 @@ class Trainer:
                                   src_filenames=src_filenames,
                                   tgt_filenames=tgt_filenames,
                                   src_max_words=src_max_words,
-                                  tgt_max_words=tgt_max_words)
+                                  tgt_max_words=tgt_max_words,
+                                  reset=reset_vocabularies)
         self.init_criterions()
         self.build_model(hidden_size=hidden_size,
                          encoder_n_layers=n_layers,
@@ -142,48 +145,45 @@ class Trainer:
     def train(self, src_filenames, tgt_filenames, pair_filenames, supervised_big_epochs: int,
               unsupervised_big_epochs: int, print_every=1000, save_every=1000,
               batch_size: int=32, n_unsupervised_batches: int=None, n_supervised_batches: int=None,
-              save_file: str="model"):
-        src_batches = self.get_one_lang_batches(src_filenames, lang="src",
-                                                batch_size=batch_size, n=n_unsupervised_batches)
-        tgt_batches = self.get_one_lang_batches(tgt_filenames, lang="tgt",
-                                                batch_size=batch_size, n=n_unsupervised_batches)
-        count_unsupervised_batches = min(len(src_batches), len(tgt_batches))
+              save_file: str="model", enable_unsupervised_backtranslation=False):
+        if pair_filenames[0] is not None and supervised_big_epochs != 0:
+            parallel_forward_batches = self.get_bilingual_batches(pair_filenames, "src", batch_size,
+                                                                  n=n_supervised_batches)
+            reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
+            reverted_batches = self.get_bilingual_batches(reverted_pairs, "tgt", batch_size, n=n_supervised_batches)
 
-#         parallel_forward_batches = self.get_bilingual_batches(pair_filenames, lang="src",
-#                                                               batch_size=batch_size, n=n_supervised_batches)
-#         reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
-#         reverted_batches = self.get_bilingual_batches(reverted_pairs, lang="tgt",
-#                                                       batch_size=batch_size, n=n_supervised_batches)
-#         count_supervised_batches = len(parallel_forward_batches)
+            for big_epoch in range(supervised_big_epochs):
+                timer = time.time()
+                print_loss_total = 0
+                epoch = 0
+                for batch, reverted_batch in zip(parallel_forward_batches, reverted_batches):
+                    self.model.train()
+                    loss = self.train_bilingual_batch(batch, reverted_batch)
 
-#         print("Src batch:", src_batches[0])
-#         print("Tgt batch:", tgt_batches[0])
+                    print_loss_total += loss
+                    if epoch % save_every == 0 and epoch != 0:
+                        self.save(save_file+"_supervised.pt")
+                    if epoch % print_every == 0 and epoch != 0:
+                        print_loss_avg = print_loss_total / print_every
+                        print_loss_total = 0
+                        diff = time.time() - timer
+                        timer = time.time()
+                        print('%s big epoch, %s epoch, %s sec, %.4f main loss' %
+                              (big_epoch, epoch, diff, print_loss_avg))
+                    epoch += 1
+                self.save(save_file+"_supervised.pt")
+            self.current_translation_model = self.model
 
-#         for big_epoch in range(supervised_big_epochs):
-#             timer = time.time()
-#             print_loss_total = 0
-#             for epoch, batch in enumerate(parallel_forward_batches):
-#                 self.model.train()
-#                 loss = self.train_bilingual_batch(batch, reverted_batches[epoch])
-
-#                 print_loss_total += loss
-#                 if epoch % save_every == 0 and epoch != 0:
-#                     self.save(save_file+"_supervised.pt")
-#                 if epoch % print_every == 0 and epoch != 0:
-#                     print_loss_avg = print_loss_total / print_every
-#                     print_loss_total = 0
-#                     diff = time.time() - timer
-#                     timer = time.time()
-#                     print('%s big epoch, %s/%s epoch, %s sec, %.4f main loss' %
-#                           (big_epoch, epoch, count_supervised_batches, diff, print_loss_avg))
-#             self.save(save_file+"_supervised.pt")
-#         self.current_translation_model = self.model
-
+        src_batches = self.get_one_lang_batches(src_filenames, "src", batch_size, n=n_unsupervised_batches)
+        tgt_batches = self.get_one_lang_batches(tgt_filenames, "tgt", batch_size, n=n_unsupervised_batches)
+        print("Src batch:", next(src_batches))
+        print("Tgt batch:", next(tgt_batches))
         for big_epoch in range(unsupervised_big_epochs):
             timer = time.time()
             print_main_loss_total = 0
             print_discriminator_loss_total = 0
-            for epoch, (src_batch, tgt_batch) in enumerate(zip(src_batches, tgt_batches)):
+            epoch = 0
+            for src_batch, tgt_batch in zip(src_batches, tgt_batches):
                 self.model.train()
                 discriminator_loss, losses = self.train_batch(src_batch, tgt_batch)
                 main_loss = sum(losses)
@@ -191,7 +191,7 @@ class Trainer:
                 print_main_loss_total += main_loss
                 print_discriminator_loss_total += discriminator_loss
                 if epoch % save_every == 0 and epoch != 0:
-                    self.save(save_file+".pt")
+                    self.save(save_file + ".pt")
                 if epoch % print_every == 0 and epoch != 0:
                     print_main_loss_avg = print_main_loss_total / print_every
                     print_discriminator_loss_avg = print_discriminator_loss_total / print_every
@@ -201,45 +201,34 @@ class Trainer:
                     timer = time.time()
                     print(Translator.translate(self.model, "you can prepare your meals here .", "src", "src",
                                                self.all_vocabulary, self.use_cuda))
-                    print(Translator.translate(self.model, "по запросу могут приготовить другие блюда .", "tgt", "tgt",
-                                               self.all_vocabulary, self.use_cuda))
                     print(Translator.translate(self.model, "you can prepare your meals here .", "src", "tgt",
                                                self.all_vocabulary, self.use_cuda))
-                    print(Translator.translate(self.model, "по запросу могут приготовить другие блюда .", "tgt", "src",
-                                               self.all_vocabulary, self.use_cuda))
-                    print('%s big epoch, %s/%s epoch, %s sec, %.4f main loss, %.4f discriminator loss, current losses: %s' %
-                          (big_epoch, epoch, count_unsupervised_batches, diff,
-                           print_main_loss_avg, print_discriminator_loss_avg, losses))
-                    self.save(save_file+".pt")
-                    # self.current_translation_model = self.model
-                    print('%s big epoch, %s/%s epoch, %s sec, %.4f main loss, %.4f discriminator loss' %
-                          (big_epoch, epoch, count_unsupervised_batches, diff,
-                           print_main_loss_avg, print_discriminator_loss_avg))
+                    print('%s big epoch, %s epoch, %s sec, %.4f main loss, '
+                          '%.4f discriminator loss, current losses: %s' %
+                          (big_epoch, epoch, diff, print_main_loss_avg, print_discriminator_loss_avg, losses))
+                epoch += 1
             self.save(save_file+".pt")
-            # self.current_translation_model = self.model
+            if enable_unsupervised_backtranslation:
+                self.current_translation_model = self.model
 
     def get_one_lang_batches(self, filenames, lang, batch_size: int=32, n=None):
         batch_generator = OneLangBatchGenerator(filenames, batch_size, self.max_length, self.all_vocabulary, lang)
-        batches = []
         i = 0
         for batch in batch_generator:
-            batches.append(batch)
+            yield batch
             if n is not None and i == n:
                 break
             i += 1
-        return batches
 
     def get_bilingual_batches(self, filenames, lang, batch_size: int=32, n=None):
         batch_generator = BilingualBatchGenerator(filenames, batch_size, self.max_length,
                                                   self.all_vocabulary, lang, self.use_cuda)
-        batches = []
         i = 0
         for batch in batch_generator:
-            batches.append(batch)
+            yield batch
             if n is not None and i == n:
                 break
             i += 1
-        return batches
 
     def train_batch(self, src_batch: OneLangBatch, tgt_batch: OneLangBatch):
         batch_size = len(src_batch.lengths)
@@ -278,12 +267,14 @@ class Trainer:
         # Main step
         self.main_optimizer.zero_grad()
         losses = self.model(src_batch, tgt_batch, src_noisy_batch, tgt_noisy_batch, src_batch_,
-                          tgt_batch_, src_translated_noisy_batch, tgt_translated_noisy_batch,
-                          src_batch__, tgt_batch__, batch_size, self.criterion)
+                            tgt_batch_, src_translated_noisy_batch, tgt_translated_noisy_batch,
+                            src_batch__, tgt_batch__, batch_size, self.criterion)
+        # timer = time.time()
         loss = sum(losses)
         loss.backward()
         nn.utils.clip_grad_norm(self.model.parameters(), 5)
         self.main_optimizer.step()
+        # print("Backward: %s sec" % (time.time() - timer))
 
         losses = [loss.data[0] for loss in losses]
         return discriminator_loss.data[0], losses
@@ -294,13 +285,13 @@ class Trainer:
         reverted_batch = reverted_batch.cuda()
         _, loss_src = self.model.encoder_decoder_run(self.model.encoder, self.model.decoder, self.model.generator,
                                                      self.criterion, batch.src_variable, batch.src_lengths,
-                                                     batch.tgt_variable, batch.tgt_lengths, len(batch.src_lengths),
-                                                     None, self.all_vocabulary.get_lang_sos("tgt"))
+                                                     batch.tgt_variable, batch.tgt_lengths, None,
+                                                     self.all_vocabulary.get_lang_sos("tgt"))
         _, loss_tgt = self.model.encoder_decoder_run(self.model.encoder, self.model.decoder, self.model.generator,
                                                      self.criterion, reverted_batch.src_variable,
                                                      reverted_batch.src_lengths, reverted_batch.tgt_variable,
-                                                     reverted_batch.tgt_lengths, len(reverted_batch.src_lengths),
-                                                     None, self.all_vocabulary.get_lang_sos("src"))
+                                                     reverted_batch.tgt_lengths, None,
+                                                     self.all_vocabulary.get_lang_sos("src"))
         loss = loss_src + loss_tgt
         loss.backward()
         nn.utils.clip_grad_norm(self.model.parameters(), 5)
