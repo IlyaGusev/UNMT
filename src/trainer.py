@@ -51,19 +51,19 @@ class Trainer:
             for filename in src_filenames:
                 self.src_vocabulary = self.add_filename_to_vocabulary(filename, self.src_vocabulary)
             self.src_vocabulary.shrink(src_max_words)
-            self.src_vocabulary.save()
+            self.src_vocabulary.save(src_vocabulary_path)
         assert self.src_vocabulary.size() > 4
 
         if self.tgt_vocabulary.is_empty():
             for filename in tgt_filenames:
                 self.tgt_vocabulary = self.add_filename_to_vocabulary(filename, self.tgt_vocabulary)
             self.tgt_vocabulary.shrink(tgt_max_words)
-            self.tgt_vocabulary.save()
+            self.tgt_vocabulary.save(tgt_vocabulary_path)
         assert self.tgt_vocabulary.size() > 4
 
         if self.all_vocabulary.is_empty():
             self.all_vocabulary = Vocabulary.merge(self.src_vocabulary, self.tgt_vocabulary, all_vocabulary_path)
-            self.all_vocabulary.save()
+            self.all_vocabulary.save(all_vocabulary_path)
         assert self.all_vocabulary.size() == self.src_vocabulary.size() + self.tgt_vocabulary.size() - 1
 
     def init_criterions(self):
@@ -100,11 +100,10 @@ class Trainer:
         print("Params: ", params)
 
     def build_word_by_word_model(self, src_to_tgt_dict_filename, tgt_to_src_dict_filename):
-        self.current_translation_model = WordByWordModel(src_to_tgt_dict_filename, tgt_to_src_dict_filename,
-                                                         self.all_vocabulary)
+        return WordByWordModel(src_to_tgt_dict_filename, tgt_to_src_dict_filename, self.all_vocabulary)
 
-    def init_model(self, src_filenames=None, tgt_filenames=None, src_to_tgt_dict_filename=None,
-                   tgt_to_src_dict_filename=None, src_embeddings_filename=None, tgt_embeddings_filename=None,
+    def init_model(self, src_filenames=None, tgt_filenames=None,
+                   src_embeddings_filename=None, tgt_embeddings_filename=None,
                    src_max_words=80000, tgt_max_words=100000, hidden_size=200, n_layers=3, discriminator_lr=0.0005,
                    main_lr=0.0003, main_betas=(0.5, 0.999), discriminator_hidden_size=512,
                    src_vocabulary_path: str="src.pickle", tgt_vocabulary_path: str="tgt.pickle",
@@ -133,51 +132,17 @@ class Trainer:
                              main_lr=main_lr,
                              main_betas=main_betas)
 
-        if src_to_tgt_dict_filename is not None:
-            self.build_word_by_word_model(src_to_tgt_dict_filename=src_to_tgt_dict_filename,
-                                          tgt_to_src_dict_filename=tgt_to_src_dict_filename)
-
         self.print_summary()
 
-    def train(self, src_filenames, tgt_filenames, pair_filenames, supervised_big_epochs: int,
+    def train(self, src_filenames, tgt_filenames,
               unsupervised_big_epochs: int, print_every=1000, save_every=1000,
-              batch_size: int=32, n_unsupervised_batches: int=None, n_supervised_batches: int=None,
+              batch_size: int=32, n_unsupervised_batches: int=None,
               save_file: str="model"):
         src_batches = self.get_one_lang_batches(src_filenames, lang="src",
                                                 batch_size=batch_size, n=n_unsupervised_batches)
         tgt_batches = self.get_one_lang_batches(tgt_filenames, lang="tgt",
                                                 batch_size=batch_size, n=n_unsupervised_batches)
         count_unsupervised_batches = min(len(src_batches), len(tgt_batches))
-
-#         parallel_forward_batches = self.get_bilingual_batches(pair_filenames, lang="src",
-#                                                               batch_size=batch_size, n=n_supervised_batches)
-#         reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
-#         reverted_batches = self.get_bilingual_batches(reverted_pairs, lang="tgt",
-#                                                       batch_size=batch_size, n=n_supervised_batches)
-#         count_supervised_batches = len(parallel_forward_batches)
-
-#         print("Src batch:", src_batches[0])
-#         print("Tgt batch:", tgt_batches[0])
-
-#         for big_epoch in range(supervised_big_epochs):
-#             timer = time.time()
-#             print_loss_total = 0
-#             for epoch, batch in enumerate(parallel_forward_batches):
-#                 self.model.train()
-#                 loss = self.train_bilingual_batch(batch, reverted_batches[epoch])
-
-#                 print_loss_total += loss
-#                 if epoch % save_every == 0 and epoch != 0:
-#                     self.save(save_file+"_supervised.pt")
-#                 if epoch % print_every == 0 and epoch != 0:
-#                     print_loss_avg = print_loss_total / print_every
-#                     print_loss_total = 0
-#                     diff = time.time() - timer
-#                     timer = time.time()
-#                     print('%s big epoch, %s/%s epoch, %s sec, %.4f main loss' %
-#                           (big_epoch, epoch, count_supervised_batches, diff, print_loss_avg))
-#             self.save(save_file+"_supervised.pt")
-#         self.current_translation_model = self.model
 
         for big_epoch in range(unsupervised_big_epochs):
             timer = time.time()
@@ -290,8 +255,8 @@ class Trainer:
 
     def train_bilingual_batch(self, batch: BilingualBatch, reverted_batch: BilingualBatch):
         self.main_optimizer.zero_grad()
-        batch = batch.cuda()
-        reverted_batch = reverted_batch.cuda()
+        batch = batch.cuda() if self.use_cuda else batch
+        reverted_batch = reverted_batch.cuda() if self.use_cuda else reverted_batch
         _, loss_src = self.model.encoder_decoder_run(self.model.encoder, self.model.decoder, self.model.generator,
                                                      self.criterion, batch.src_variable, batch.src_lengths,
                                                      batch.tgt_variable, batch.tgt_lengths, len(batch.src_lengths),
