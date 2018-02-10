@@ -128,7 +128,8 @@ opt = parser.parse_args()
 
 def zero_model(state, use_cuda, print_every=1000, save_every=1000, save_file: str="model"):
     if opt.src_to_tgt_dict is not None and opt.tgt_to_src_dict is not None:
-        state.current_translation_model = state.build_word_by_word_model(src_to_tgt_dict_filename=opt.src_to_tgt_dict,                                                                         tgt_to_src_dict_filename=opt.tgt_to_src_dict)
+        state.current_translation_model = state.build_word_by_word_model(src_to_tgt_dict_filename=opt.src_to_tgt_dict,
+                                                                         tgt_to_src_dict_filename=opt.tgt_to_src_dict)
 
     elif opt.bootstrapped_model is not None:
         state.load(opt.bootstrapped_model)
@@ -180,7 +181,8 @@ def zero_model(state, use_cuda, print_every=1000, save_every=1000, save_file: st
             state.save(save_file + "_supervised.pt")
         state.current_translation_model = state.model
 
-    raise ValueError('Zero Model was not initialized')
+    else:
+        raise ValueError('Zero Model was not initialized')
 
 
 def main():
