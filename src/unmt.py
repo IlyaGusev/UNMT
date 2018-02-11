@@ -1,38 +1,12 @@
+from collections import namedtuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.autograd import Variable
 
-from src.models import EncoderRNN, Generator, AttnDecoderRNN
+from src.models import EncoderRNN, Generator, AttnDecoderRNN, Discriminator
 
-
-class Discriminator(nn.Module):
-    def __init__(self, max_length, encoder_hidden_size, hidden_size=1024, n_layers=3, activation=F.leaky_relu):
-        super(Discriminator, self).__init__()
-
-        self.encoder_hidden_size = encoder_hidden_size
-        self.hidden_size = hidden_size
-        self.n_layers = n_layers
-        self.activation = activation
-        self.max_length = max_length
-
-        layers = list()
-        layers.append(nn.Linear(encoder_hidden_size * max_length, hidden_size))
-        for i in range(n_layers - 1):
-            layers.append(nn.Linear(hidden_size, hidden_size))
-        self.layers = nn.ModuleList(layers)
-        self.out = nn.Linear(hidden_size, 1)
-
-    def forward(self, encoder_output):
-        max_length = encoder_output.size(0)
-        batch_size = encoder_output.size(1)
-        output = encoder_output.transpose(0, 1).contiguous().view(batch_size, max_length * self.encoder_hidden_size)
-        output = F.pad(output, (0, (self.max_length - max_length) * self.encoder_hidden_size), "constant", 0)
-        # S = batch_size, max_length * encoder_hidden_size
-        for i in range(self.n_layers):
-            output = self.layers[i](output)
-            output = self.activation(output)
-        return F.sigmoid(self.out(output))
+RunResult = namedtuple("RunResult", "encoder_output decoder_output attn_weights output_variable")
 
 
 class UNMT(nn.Module):
@@ -42,17 +16,14 @@ class UNMT(nn.Module):
         super(UNMT, self).__init__()
 
         self.embedding_dim = embedding_dim
-
         self.all_vocabulary = all_vocabulary
         self.all_size = all_vocabulary.size()
-
         self.hidden_size = hidden_size
         self.encoder_n_layers = encoder_n_layers
         self.decoder_n_layers = decoder_n_layers
         self.dropout = dropout
         self.max_length = max_length
         self.discriminator_hidden_size = discriminator_hidden_size
-
         self.use_cuda = use_cuda
 
         self.encoder = EncoderRNN(self.all_size, embedding_dim, hidden_size, dropout=dropout,
@@ -65,9 +36,8 @@ class UNMT(nn.Module):
         self.encoder.embedding.weight.requires_grad = embeddings_freeze
         self.decoder.embedding.weight.requires_grad = embeddings_freeze
 
-    def load_embeddings(self, src_embeddings, tgt_embeddings, enable_training=False):
+    def load_embeddings(self, src_embeddings, tgt_embeddings):
         aligned_embeddings = torch.div(torch.randn(self.all_vocabulary.size(), 300), 10)
-        print("Enable training: ", enable_training)
         for i, word in enumerate(self.all_vocabulary.index2word):
             if "src-" == word[:4]:
                 word = word[4:]
@@ -78,95 +48,62 @@ class UNMT(nn.Module):
                 if word in tgt_embeddings.wv:
                     aligned_embeddings[i] = torch.FloatTensor(tgt_embeddings.wv[word])
 
-        self.encoder.embedding.weight = nn.Parameter(aligned_embeddings)
-        self.decoder.embedding.weight = nn.Parameter(aligned_embeddings)
+        enable_training = self.encoder.embedding.weight.requires_grad
+        self.encoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
+        self.decoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
 
-        self.encoder.embedding.weight.requires_grad = enable_training
-        self.decoder.embedding.weight.requires_grad = enable_training
+    def forward(self, input_batches, sos_indices, gtruth_batches=None):
+        assert (gtruth_batches is not None) == self.training
+        results = dict()
+        for key in input_batches:
+            input_batch = input_batches[key]
+            sos_index = sos_indices[key]
+            if gtruth_batches is not None:
+                gtruth_batch = gtruth_batches[key]
+                results[key] = self.encoder_decoder_run(self.encoder, self.decoder, self.generator,
+                                                        input_batch.variable, input_batch.lengths,
+                                                        sos_index, gtruth_batch.variable, gtruth_batch.lengths)
+            else:
+                results[key] = self.encoder_decoder_run(self.encoder, self.decoder, self.generator,
+                                                        input_batch.variable, input_batch.lengths,
+                                                        sos_index)
+        return results
 
-    def forward(self, src_batch, tgt_batch, src_noisy_batch, tgt_noisy_batch, src_batch_, tgt_batch_,
-                src_translated_noisy_batch, tgt_translated_noisy_batch, src_batch__, tgt_batch__,
-                batch_size, criterion):
-        adv_ones_variable = Variable(torch.add(torch.ones((batch_size,)), -0.1), requires_grad=False)
-        adv_ones_variable = adv_ones_variable.cuda() if self.use_cuda else adv_ones_variable
-        adv_zeros_variable = Variable(torch.add(torch.zeros((batch_size,)), 0.1), requires_grad=False)
-        adv_zeros_variable = adv_zeros_variable.cuda() if self.use_cuda else adv_zeros_variable
+    def encoder_decoder_run(self, encoder, decoder, generator, variable, lengths, sos_index,
+                            gtruth_variable=None, gtruth_lengths=None):
+        assert (gtruth_variable is not None) == self.training
+        assert (gtruth_lengths is not None) == self.training
 
-        src_adv_loss, src_auto_loss = \
-            self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
-                                     src_noisy_batch.variable, src_noisy_batch.lengths,
-                                     src_batch_.variable, src_batch_.lengths,  adv_ones_variable,
-                                     self.all_vocabulary.get_lang_sos("src"))
-
-        tgt_adv_loss, tgt_auto_loss = \
-            self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
-                                     tgt_noisy_batch.variable, tgt_noisy_batch.lengths,
-                                     tgt_batch_.variable, tgt_batch_.lengths,  adv_zeros_variable,
-                                     self.all_vocabulary.get_lang_sos("tgt"))
-        
-        cd_src_adv_loss, cd_src_cd_loss = \
-            self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
-                                     src_translated_noisy_batch.variable, src_translated_noisy_batch.lengths,
-                                     src_batch__.variable, src_batch__.lengths,  adv_zeros_variable,
-                                     self.all_vocabulary.get_lang_sos("src"))
-        
-        cd_tgt_adv_loss, cd_tgt_cd_loss = \
-            self.encoder_decoder_run(self.encoder, self.decoder, self.generator, criterion,
-                                     tgt_translated_noisy_batch.variable, tgt_translated_noisy_batch.lengths,
-                                     tgt_batch__.variable, tgt_batch__.lengths,adv_ones_variable,
-                                     self.all_vocabulary.get_lang_sos("tgt"))
-
-        return [src_adv_loss, tgt_adv_loss, cd_tgt_adv_loss, cd_src_adv_loss, 
-                src_auto_loss, tgt_auto_loss, cd_src_cd_loss, cd_tgt_cd_loss]
-
-    def encoder_decoder_run(self, encoder, decoder, generator, criterion, variable, lengths,
-                            gt_variable, gt_lengths, adv_variable, sos_index):
-        encoder_output, encoder_hidden = encoder(variable, lengths, None)
-
-        adv_loss = 0
-        if adv_variable is not None:
-            adv_loss = self.get_discriminator_loss(encoder_output, adv_variable)
-
-        main_loss = 0
-        initial_input, initial_context = decoder.init_state(encoder_output, sos_index)
-        decoder_output, _, _ = decoder(gt_variable, gt_lengths, encoder_hidden, encoder_output,
-                                       initial_input, initial_context)
-        max_length = max(gt_lengths)
-        for t in range(max_length):
-            scores = generator(decoder_output[t])
-            main_loss += criterion(scores, gt_variable[t])
-        return adv_loss, main_loss
-
-    def get_discriminator_loss(self, encoder_output, target_variable):
-        adv_criterion = nn.BCELoss()
-        log_prob = self.discriminator(encoder_output)
-        log_prob = log_prob.view(-1)
-        adv_loss = adv_criterion(log_prob, target_variable)
-        return adv_loss
-
-    def translate(self, variable, encoder, decoder, generator, lengths, sos_index):
-        self.eval()
-        batch_size = variable.size(1)
-        output_variable = Variable(torch.zeros(self.max_length, batch_size)).type(torch.LongTensor)
-        output_variable = output_variable.cuda() if self.use_cuda else output_variable
-
-        encoder_output, hidden = encoder(variable, lengths, None)
+        encoder_output, encoder_hidden = encoder(variable, lengths)
         current_input, context = decoder.init_state(encoder_output, sos_index)
-        for t in range(self.max_length):
-            output, hidden, attn = decoder(None, None, hidden, encoder_output, current_input, context, one_step=True)
-            context = output
+        decoder_hidden = encoder_hidden
 
-            scores = generator(output.squeeze(0))
-            top_indices = scores.topk(1, dim=1)[1].view(-1)
-            output_variable[t] = top_indices
-            current_input = top_indices
-        output_variable = output_variable.detach()
-        return output_variable
+        max_encoder_length = encoder_output.size(0)
+        batch_size = encoder_output.size(1)
 
-    def translate_to_tgt(self, variable, lengths):
-        return self.translate(variable, self.encoder, self.decoder, self.generator, lengths,
-                              self.all_vocabulary.get_lang_sos("tgt"))
+        decoder_output = Variable(torch.zeros(max_encoder_length, batch_size, self.hidden_size), requires_grad=False)
+        decoder_output = decoder_output.cuda() if self.use_cuda else decoder_output
+        attn_weights = Variable(torch.zeros(max_encoder_length, batch_size, self.max_length), requires_grad=False)
+        attn_weights = attn_weights.cuda() if self.use_cuda else attn_weights
+        output_variable = None
+        if not self.training:
+            output_variable = Variable(torch.zeros(self.max_length, batch_size)).type(torch.LongTensor)
+            output_variable = output_variable.cuda() if self.use_cuda else output_variable
 
-    def translate_to_src(self, variable, lengths):
-        return self.translate(variable, self.encoder, self.decoder, self.generator, lengths,
-                              self.all_vocabulary.get_lang_sos("src"))
+        max_length = max(gtruth_lengths) if self.training else self.max_length
+
+        for t in range(max_length):
+            context, decoder_hidden, attn = decoder(current_input, decoder_hidden, encoder_output, context)
+            decoder_output[t] = context
+            attn_weights[t] = attn
+            if self.training:
+                current_input = gtruth_variable[t]
+            else:
+                scores = generator(context.squeeze(0))
+                top_indices = scores.topk(1, dim=1)[1].view(-1)
+                output_variable[t] = top_indices
+                current_input = top_indices
+        if not self.training:
+            output_variable = output_variable.detach()
+
+        return RunResult(encoder_output, decoder_output, attn_weights, output_variable)

@@ -16,6 +16,7 @@ from utils.batch import OneLangBatch, OneLangBatchGenerator, indices_from_senten
 from utils.tqdm import tqdm_open
 from utils.vocabulary import Vocabulary
 from src.translator import Translator
+from src.loss import DiscriminatorLossCompute, MainLossCompute
 
 
 class Trainer:
@@ -35,6 +36,9 @@ class Trainer:
         self.criterion = None
         self.discriminator_optimizer = None
         self.main_optimizer = None
+
+        self.adv_ones_variable = None
+        self.adv_zeros_variable = None
 
     def collect_vocabularies(self, src_vocabulary_path: str, tgt_vocabulary_path: str, all_vocabulary_path: str,
                              src_filenames=None, tgt_filenames=None, src_max_words=80000, tgt_max_words=100000,
@@ -142,6 +146,11 @@ class Trainer:
               unsupervised_big_epochs: int, print_every=1000, save_every=1000,
               batch_size: int=32, n_unsupervised_batches: int=None, save_file: str="model",
               enable_unsupervised_backtranslation=False):
+        self.adv_ones_variable = Variable(torch.add(torch.ones((batch_size,)), -0.1), requires_grad=False)
+        self.adv_ones_variable = self.adv_ones_variable.cuda() if self.use_cuda else self.adv_ones_variable
+        self.adv_zeros_variable = Variable(torch.add(torch.zeros((batch_size,)), 0.1), requires_grad=False)
+        self.adv_zeros_variable = self.adv_zeros_variable.cuda() if self.use_cuda else self.adv_zeros_variable
+
         for big_epoch in range(unsupervised_big_epochs):
             src_batches = self.get_one_lang_batches(src_filenames, "src", batch_size, n=n_unsupervised_batches)
             tgt_batches = self.get_one_lang_batches(tgt_filenames, "tgt", batch_size, n=n_unsupervised_batches)
@@ -199,68 +208,91 @@ class Trainer:
             i += 1
 
     def train_batch(self, src_batch: OneLangBatch, tgt_batch: OneLangBatch):
-        batch_size = len(src_batch.lengths)
+        assert self.model.training
         src_batch = src_batch.cuda() if self.use_cuda else src_batch
         tgt_batch = tgt_batch.cuda() if self.use_cuda else tgt_batch
 
         discriminator_loss = self.discriminator_step(src_batch, tgt_batch)
 
-        src_noisy_batch, src_batch_ = BatchTransformer.noise(src_batch)
-        # print("Src noisy batch: ", src_noisy_batch)
-        # print("Src old new batch: ", src_batch_)
+        # Main step
+        input_batches = dict()
+        gtruth_batches = dict()
+        sos_indices = dict()
 
-        tgt_noisy_batch, tgt_batch_ = BatchTransformer.noise(tgt_batch)
-        # print("Tgt noisy batch: ", tgt_noisy_batch)
-        # print("Tgt old new batch: ", tgt_batch_)
+        input_batches["auto-src"], gtruth_batches["auto-src"] = BatchTransformer.noise(src_batch)
+        input_batches["auto-tgt"], gtruth_batches["auto-tgt"] = BatchTransformer.noise(tgt_batch)
 
         translation_func = self.current_translation_model.translate_to_tgt
-        src_translated_noisy_batch,  src_batch__ = BatchTransformer.translate_with_noise(src_batch, translation_func)
-        # print("Src noisy translated batch: ", src_translated_noisy_batch)
-        # print("Src old new untranslated batch: ", src_batch__)
-
+        input_batches["cd-src"], gtruth_batches["cd-src"] = \
+            BatchTransformer.translate_with_noise(src_batch, translation_func)
         translation_func = self.current_translation_model.translate_to_src
-        tgt_translated_noisy_batch,  tgt_batch__ = BatchTransformer.translate_with_noise(tgt_batch, translation_func)
-        # print("Tgt noisy translated batch: ", tgt_translated_noisy_batch)
-        # print("Tgt old new untranslated batch: ", tgt_batch__)
+        input_batches["cd-tgt"], gtruth_batches["cd-tgt"] = \
+            BatchTransformer.translate_with_noise(tgt_batch, translation_func)
 
-        src_batch_ = src_batch_.cuda() if self.use_cuda else src_batch_
-        tgt_batch_ = tgt_batch_.cuda() if self.use_cuda else tgt_batch_
-        src_batch__ = src_batch__.cuda() if self.use_cuda else src_batch__
-        tgt_batch__ = tgt_batch__.cuda() if self.use_cuda else tgt_batch__
-        src_noisy_batch = src_noisy_batch.cuda() if self.use_cuda else src_noisy_batch
-        tgt_noisy_batch = tgt_noisy_batch.cuda() if self.use_cuda else tgt_noisy_batch
-        src_translated_noisy_batch = src_translated_noisy_batch.cuda() if self.use_cuda else src_translated_noisy_batch
-        tgt_translated_noisy_batch = tgt_translated_noisy_batch.cuda() if self.use_cuda else tgt_translated_noisy_batch
+        if True:
+            print("Src noisy batch: ", input_batches["auto-src"])
+            print("Src old new batch: ", gtruth_batches["auto-src"])
+            print("Tgt noisy batch: ", input_batches["auto-tgt"])
+            print("Tgt old new batch: ", gtruth_batches["auto-tgt"])
+            print("Src noisy translated batch: ", input_batches["cd-src"])
+            print("Src old new untranslated batch: ", gtruth_batches["cd-src"])
+            print("Tgt noisy translated batch: ", input_batches["cd-tgt"])
+            print("Tgt old new untranslated batch: ", gtruth_batches["cd-tgt"])
 
-        # Main step
+        for key in gtruth_batches:
+            gtruth_batches[key] = gtruth_batches[key].cuda() if self.use_cuda else gtruth_batches[key]
+        for key in gtruth_batches:
+            input_batches[key] = input_batches[key].cuda() if self.use_cuda else input_batches[key]
+        for key in gtruth_batches:
+            sos_indices[key] = self.all_vocabulary.get_lang_sos(key[-3:])
+
+        adv_targets = dict()
+        adv_targets["auto-src"] = self.adv_ones_variable
+        adv_targets["auto-tgt"] = self.adv_zeros_variable
+        adv_targets["cd-src"] = self.adv_zeros_variable
+        adv_targets["cd-tgt"] = self.adv_ones_variable
+
         self.main_optimizer.zero_grad()
-        losses = self.model(src_batch, tgt_batch, src_noisy_batch, tgt_noisy_batch, src_batch_,
-                            tgt_batch_, src_translated_noisy_batch, tgt_translated_noisy_batch,
-                            src_batch__, tgt_batch__, batch_size, self.criterion)
-        # timer = time.time()
+
+        results = self.model(input_batches, sos_indices, gtruth_batches)
+
+        main_loss_computer = MainLossCompute(self.model.generator, self.all_vocabulary)
+        adv_loss_computer = DiscriminatorLossCompute(self.model.discriminator)
+        losses = []
+        for key, result in results.items():
+            main_loss = main_loss_computer.compute_loss(result.decoder_output, gtruth_batches[key])
+            adv_loss = adv_loss_computer.compute_loss(result.encoder_output, adv_targets[key])
+            losses += [main_loss, adv_loss]
         loss = sum(losses)
         loss.backward()
         nn.utils.clip_grad_norm(self.model.parameters(), 5)
         self.main_optimizer.step()
-        # print("Backward: %s sec" % (time.time() - timer))
 
         losses = [loss.data[0] for loss in losses]
-        return discriminator_loss.data[0], losses
+        return discriminator_loss, losses
 
     def train_bilingual_batch(self, batch: BilingualBatch, reverted_batch: BilingualBatch):
-        self.main_optimizer.zero_grad()
+        assert self.model.training
         batch = batch.cuda() if self.use_cuda else batch
         reverted_batch = reverted_batch.cuda() if self.use_cuda else reverted_batch
-        _, loss_src = self.model.encoder_decoder_run(self.model.encoder, self.model.decoder, self.model.generator,
-                                                     self.criterion, batch.src_variable, batch.src_lengths,
-                                                     batch.tgt_variable, batch.tgt_lengths, None,
-                                                     self.all_vocabulary.get_lang_sos("tgt"))
-        _, loss_tgt = self.model.encoder_decoder_run(self.model.encoder, self.model.decoder, self.model.generator,
-                                                     self.criterion, reverted_batch.src_variable,
-                                                     reverted_batch.src_lengths, reverted_batch.tgt_variable,
-                                                     reverted_batch.tgt_lengths, None,
-                                                     self.all_vocabulary.get_lang_sos("src"))
-        loss = loss_src + loss_tgt
+
+        input_batches = dict()
+        gtruth_batches = dict()
+        sos_indices = dict()
+        input_batches["src-tgt"] = gtruth_batches["tgt-src"] = batch
+        input_batches["tgt-src"] = gtruth_batches["src-tgt"] = reverted_batch
+        for key in gtruth_batches:
+            sos_indices[key] = self.all_vocabulary.get_lang_sos(key[-3:])
+        self.main_optimizer.zero_grad()
+
+        results = self.model(input_batches, sos_indices, gtruth_batches)
+
+        main_loss_computer = MainLossCompute(self.model.generator, self.all_vocabulary)
+        losses = []
+        for key, result in results.items():
+            main_loss = main_loss_computer.compute_loss(result.decoder_output, gtruth_batches[key])
+            losses += [main_loss]
+        loss = sum(losses)
         loss.backward()
         nn.utils.clip_grad_norm(self.model.parameters(), 5)
         self.main_optimizer.step()
@@ -269,25 +301,15 @@ class Trainer:
 
     def discriminator_step(self, src_batch, tgt_batch):
         self.discriminator_optimizer.zero_grad()
-        batch_size = len(src_batch.lengths)
-
-        src_variable = Variable(torch.zeros((batch_size,)), requires_grad=False)
-        src_variable = torch.add(src_variable, 0.1)
-        src_variable = src_variable.cuda() if self.use_cuda else src_variable
         src_adv_loss = self.get_discriminator_loss(batch=src_batch, encoder=self.model.encoder,
-                                                   target_variable=src_variable)
-
-        tgt_variable = Variable(torch.ones((batch_size,)), requires_grad=False)
-        tgt_variable = torch.add(tgt_variable, -0.1)
-        tgt_variable = tgt_variable.cuda() if self.use_cuda else tgt_variable
+                                                   target_variable=self.adv_zeros_variable)
         tgt_adv_loss = self.get_discriminator_loss(batch=tgt_batch, encoder=self.model.encoder,
-                                                   target_variable=tgt_variable)
+                                                   target_variable=self.adv_ones_variable)
         discriminator_loss = src_adv_loss + tgt_adv_loss
         discriminator_loss.backward()
         nn.utils.clip_grad_norm(self.model.discriminator.parameters(), 5)
         self.discriminator_optimizer.step()
-
-        return discriminator_loss
+        return discriminator_loss.data[0]
 
     def get_discriminator_loss(self, batch: OneLangBatch, encoder: EncoderRNN, target_variable: Variable):
         adv_criterion = nn.BCELoss()

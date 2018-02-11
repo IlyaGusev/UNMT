@@ -3,15 +3,19 @@ from torch.autograd import Variable
 
 from utils.batch import indices_from_sentence
 from utils.vocabulary import Vocabulary
+from src.unmt import UNMT
 
 
 class Translator:
     @staticmethod
-    def translate(model, sentence, src_lang, tgt_lang, vocabulary: Vocabulary, use_cuda):
+    def translate(model: UNMT, sentence, src_lang, tgt_lang, vocabulary: Vocabulary, use_cuda):
         model.eval()
-        translator = model.translate_to_src if tgt_lang == "src" else model.translate_to_tgt
-        variable, lengths = Translator.sentence_to_variable(sentence, src_lang, vocabulary, use_cuda)
-        translated = list(translator(variable, lengths)[:, 0].cpu().data.numpy())
+        input_batches = dict()
+        sos_indices = dict()
+        input_batches[src_lang], lengths = Translator.sentence_to_variable(sentence, src_lang, vocabulary, use_cuda)
+        sos_indices[src_lang] = vocabulary.get_lang_sos(tgt_lang)
+        result = model.forward(input_batches, sos_indices)
+        translated = list(result.output_variable[:, 0].cpu().data.numpy())
         words = []
         for i in translated:
             word = vocabulary.get_word_lang(i)

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
@@ -31,52 +32,6 @@ class EncoderRNN(nn.Module):
 
         n = hidden[0].size(0)
         hidden = (torch.cat([hidden[0][0:n:2], hidden[0][1:n:2]], 2), torch.cat([hidden[1][0:n:2], hidden[1][1:n:2]], 2))
-        return outputs, hidden
-
-
-class DecoderRNN(nn.Module):
-    def __init__(self, embedding_dim, hidden_size, output_size, n_layers=3,
-                 dropout=0.3, max_length=50, use_cuda=False):
-        super(DecoderRNN, self).__init__()
-
-        self.embedding_dim = embedding_dim
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.dropout = dropout
-        self.max_length = max_length
-        self.use_cuda = use_cuda
-
-        self.embedding = nn.Embedding(output_size, embedding_dim)
-        self.rnn = nn.LSTM(embedding_dim, hidden_size, n_layers, dropout=dropout)
-
-    def step(self, input_seq, hidden):
-        # hidden: S = n_layers x B x N
-        embedded = self.embedding(input_seq).unsqueeze(0)  # S = 1 x B x E
-        output, hidden = self.rnn(embedded, hidden)
-        return output, hidden
-
-    def init_state(self, batch_size, sos_index):
-        initial_input = Variable(torch.zeros((batch_size, )).type(torch.LongTensor), requires_grad=False)
-        initial_input = torch.add(initial_input, sos_index)
-        initial_input = initial_input.cuda() if self.use_cuda else initial_input
-        return initial_input
-
-    def forward(self, inputs, input_lengths, hidden, initial_input, one_step=False):
-        current_input = initial_input
-        if one_step:
-            output, hidden = self.step(current_input, hidden)
-            return output, hidden
-
-        batch_size = len(input_lengths)
-        max_input_length = max(input_lengths) + 1
-        outputs = Variable(torch.zeros(max_input_length, batch_size, self.hidden_size), requires_grad=False)
-        outputs = outputs.cuda() if self.use_cuda else outputs
-        for t in range(max_input_length):
-            if t != 0:
-                current_input = inputs[t-1]
-            output, hidden = self.step(current_input, hidden)
-            outputs[t] = output
         return outputs, hidden
 
 
@@ -139,7 +94,7 @@ class AttnDecoderRNN(nn.Module):
         self.attn = Attn(hidden_size)
         self.rnn = nn.LSTM(hidden_size + embedding_dim, hidden_size, n_layers, dropout=dropout)
 
-    def step(self, input_seq, hidden, encoder_outputs, context):
+    def forward(self, input_seq, hidden, encoder_outputs, context):
         # hidden: S = n_layers x B x N
         # encoder_outputs: S = L x B x N
         embedded = self.embedding(input_seq).unsqueeze(0)  # S = 1 x B x E
@@ -173,29 +128,33 @@ class AttnDecoderRNN(nn.Module):
 
         return initial_input, initial_context
 
-    def forward(self, inputs, input_lengths, hidden, encoder_outputs, initial_input, initial_context, one_step=False):
-        max_encoder_length = encoder_outputs.size(0)
-        batch_size = encoder_outputs.size(1)
 
-        context = initial_context
-        current_input = initial_input
+class Discriminator(nn.Module):
+    def __init__(self, max_length, encoder_hidden_size, hidden_size=1024, n_layers=3):
+        super(Discriminator, self).__init__()
 
-        if one_step:
-            context, hidden, attn = self.step(current_input, hidden, encoder_outputs, context)
-            return context, hidden, attn
+        self.encoder_hidden_size = encoder_hidden_size
+        self.hidden_size = hidden_size
+        self.n_layers = n_layers
+        self.max_length = max_length
 
-        max_input_length = max(input_lengths) + 1
+        layers = list()
+        layers.append(nn.Linear(encoder_hidden_size * max_length, hidden_size))
+        layers.append(nn.LeakyReLU())
+        for i in range(n_layers - 1):
+            layers.append(nn.Linear(hidden_size, hidden_size))
+            layers.append(nn.LeakyReLU())
+        self.layers = nn.ModuleList(layers)
+        self.out = nn.Linear(hidden_size, 1)
+        self.sigmoid = nn.Sigmoid()
 
-        outputs = Variable(torch.zeros(max_input_length, batch_size, self.hidden_size), requires_grad=False)
-        outputs = outputs.cuda() if self.use_cuda else outputs
-        attn_weights = Variable(torch.zeros(max_input_length, batch_size, max_encoder_length), requires_grad=False)
-        attn_weights = attn_weights.cuda() if self.use_cuda else attn_weights
-
-        for t in range(max_input_length):
-            if t != 0:
-                current_input = inputs[t-1] 
-            context, hidden, attn = self.step(current_input, hidden, encoder_outputs, context)
-            outputs[t] = context
-            attn_weights[t] = attn
-
-        return outputs, hidden, attn_weights
+    def forward(self, encoder_output):
+        max_length = encoder_output.size(0)
+        batch_size = encoder_output.size(1)
+        output = encoder_output.transpose(0, 1).contiguous().view(batch_size, max_length * self.encoder_hidden_size)
+        output = F.pad(output, (0, (self.max_length - max_length) * self.encoder_hidden_size), "constant", 0)
+        # S = batch_size, max_length * encoder_hidden_size
+        for i in range(self.n_layers):
+            output = self.layers[i](output)
+            output = self.activation(output)
+        return self.sigmoid(self.out(output))
