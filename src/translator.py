@@ -1,36 +1,60 @@
 import torch
 from torch.autograd import Variable
 
-from utils.batch import indices_from_sentence
+from src.models import Seq2Seq
 from utils.vocabulary import Vocabulary
-from src.unmt import UNMT
 
 
 class Translator:
-    @staticmethod
-    def translate(model: UNMT, sentence, src_lang, tgt_lang, vocabulary: Vocabulary, use_cuda):
-        model.eval()
-        input_batches = dict()
-        sos_indices = dict()
-        input_batches[src_lang], lengths = Translator.sentence_to_variable(sentence, src_lang, vocabulary, use_cuda)
-        sos_indices[src_lang] = vocabulary.get_lang_sos(tgt_lang)
-        result = model.forward(input_batches, sos_indices)
-        translated = list(result.output_variable[:, 0].cpu().data.numpy())
+    def __init__(self, model:Seq2Seq, vocabulary: Vocabulary, use_cuda: bool):
+        self.model = model  # type: Seq2Seq
+        self.vocabulary = vocabulary  # type: Vocabulary
+        self.use_cuda = use_cuda
+
+    def translate_sentence(self, sentence, src_lang, tgt_lang):
+        variable, lengths = self.sentence_to_variable(sentence, src_lang)
+        sos_index = self.vocabulary.get_sos(tgt_lang)
+
+        output_variable = self.translate(variable, lengths, sos_index)
+
+        translated = list(output_variable[:, 0].cpu().data.numpy())
         words = []
         for i in translated:
-            word = vocabulary.get_word_lang(i)
+            word = self.vocabulary.get_word(i)
             if word == "</s>" or word == "<pad>":
                 break
             words.append(word)
         return " ".join(words)
 
-    @staticmethod
-    def sentence_to_variable(sentence, lang, vocabulary, use_cuda):
-        indices = indices_from_sentence(sentence, vocabulary, lang)
+    def translate(self, variable, lengths, sos_index):
+        self.model.eval()
+        _, decoder_output = self.model.forward(variable, lengths, sos_index)
+
+        max_length = max(lengths)
+        batch_size = variable.size(1)
+
+        output_variable = Variable(torch.zeros(max_length + 1, batch_size).type(torch.LongTensor))
+        output_variable = output_variable.cuda() if self.use_cuda else output_variable
+        for t in range(max_length + 1):
+            output_variable[t] = decoder_output[t].topk(1, dim=1)[1].view(-1)
+
+        output_variable = output_variable.detach()
+        return output_variable
+
+    def translate_to_tgt(self, variable: Variable, lengths: int):
+        sos_index = self.vocabulary.get_sos("tgt")
+        return self.translate(variable, lengths, sos_index)
+
+    def translate_to_src(self, variable: Variable, lengths: int):
+        sos_index = self.vocabulary.get_sos("src")
+        return self.translate(variable, lengths, sos_index)
+
+    def sentence_to_variable(self, sentence, lang):
+        indices = self.vocabulary.get_indices(sentence, lang)
         variable = Variable(torch.zeros(1, len(indices))).type(torch.LongTensor)
         indices = Variable(torch.LongTensor(indices))
         variable[0] = indices
         variable = variable.transpose(0, 1)
-        variable = variable.cuda() if use_cuda else variable
+        variable = variable.cuda() if self.use_cuda else variable
         lengths = [len(indices)]
         return variable, lengths

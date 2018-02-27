@@ -10,27 +10,25 @@ class DiscriminatorLossCompute:
         self.discriminator = discriminator
         self.criterion = nn.BCELoss()
 
-    def compute_loss(self, encoder_output, adv_target):
-        log_prob = self.discriminator(encoder_output)
+    def compute(self, encoder_output, target):
+        log_prob = self.discriminator.forward(encoder_output)
         log_prob = log_prob.view(-1)
-        adv_loss = self.criterion(log_prob, adv_target)
-        return adv_loss, adv_loss.data[0]
+        adv_loss = self.criterion(log_prob, target)
+        return adv_loss
 
 
 class MainLossCompute:
-    def __init__(self, generator: Generator, vocab: Vocabulary):
+    def __init__(self, generator: Generator, vocabulary: Vocabulary, use_cuda):
         self.generator = generator
-        self.vocab = vocab
-        self.padding_idx = vocab.get_pad()
 
-        self.adv_criterion = nn.BCELoss()
-
-        weight = torch.ones(vocab.size())
-        weight[self.padding_idx] = 0
+        weight = torch.ones(vocabulary.size())
+        weight[vocabulary.get_pad("src")] = 0
+        weight[vocabulary.get_pad("tgt")] = 0
+        weight = weight.cuda() if use_cuda else weight
         self.criterion = nn.NLLLoss(weight, size_average=False)
 
-    def compute_loss(self, decoder_output, target):
-        scores = self.generator(decoder_output)
-        gtruth = target.view(-1)
-        loss = self.criterion(scores, gtruth)
-        return loss, loss.data[0]
+    def compute(self, decoder_output, target):
+        scores = self.generator.forward(decoder_output)
+        target = target.view(-1)
+        loss = self.criterion(scores, target)
+        return loss

@@ -1,45 +1,34 @@
 from collections import Counter
-import os
+from typing import List, Tuple
 import pickle
 
 
 class Vocabulary:
-    def __init__(self, language, path):
-        self.language = language
-        self.word2index = {}
+    def __init__(self, languages: List[str]):
+        self.languages = languages
+        self.index2word = list()
+        self.word2index = dict()
         self.word2count = Counter()
-        self.index2word = ["<pad>", "</b>", "</s>", "<unk>"]
-        if os.path.exists(path):
-            self.load(path)
+        self.reset()
 
-    def get_pad(self):
-        return self.index2word.index("<pad>")
+    def get_pad(self, language):
+        return self.word2index[language+"-<pad>"]
 
-    def get_sos(self):
-        return self.index2word.index("</b>")
+    def get_sos(self, language):
+        return self.word2index[language+"-<sos>"]
 
-    def get_eos(self):
-        return self.index2word.index("</s>")
+    def get_eos(self, language):
+        return self.word2index[language+"-<eos>"]
 
-    def get_unk(self):
-        return self.index2word.index("<unk>")
+    def get_unk(self, language):
+        return self.word2index[language+"-<unk>"]
 
-    def get_lang_sos(self, lang):
-        return self.word2index[lang + "-</b>"]
+    def add_sentence(self, sentence, language):
+        for word in sentence.strip().split():
+            self.add_word(word, language)
 
-    def get_lang_eos(self, lang):
-        return self.word2index[lang + "-</s>"]
-
-    def get_lang_unk(self, lang):
-        return self.word2index[lang + "-<unk>"]
-
-    def add_sentence(self, sentence):
-        for word in sentence.split(' '):
-            if word == '':
-                continue
-            self.add_word(word)
-
-    def add_word(self, word):
+    def add_word(self, word, language):
+        word = language+"-"+word
         if word not in self.word2index:
             self.word2index[word] = len(self.index2word)
             self.word2count[word] += 1
@@ -47,53 +36,47 @@ class Vocabulary:
         else:
             self.word2count[word] += 1
 
-    def add_lang_word(self, word, lang):
-        self.add_word(lang+"-"+word)
+    def add_file(self, filename: str, language: str):
+        with open(filename, "r", encoding="utf-8") as r:
+            for line in r:
+                for word in line.strip().split():
+                    self.add_word(word, language)
 
-    def get_index(self, word):
+    def get_index(self, word, language):
+        word = language + "-" + word
         if word in self.word2index:
             return self.word2index[word]
         else:
-            if "src-" in word:
-                return self.get_index("src-<unk>")
-            if "tgt-" in word:
-                return self.get_index("tgt-<unk>")
-            return self.get_unk()
-
-    def get_lang_index(self, word, lang):
-        word = lang + "-" + word
-        if word in self.word2index:
-            return self.word2index[word]
-        else:
-            return self.get_lang_unk(lang)
+            return self.get_unk(language)
 
     def get_word(self, index):
-        return self.index2word[index]
+        return self.index2word[index].split("-", maxsplit=1)[-1]
 
-    def get_word_lang(self, index):
-        return self.index2word[index][4:]
+    def get_language(self, index):
+        return self.index2word[index].split("-", maxsplit=1)[0]
 
     def size(self):
         return len(self.index2word)
 
     def is_empty(self):
-        if self.language != "all":
-            return self.size() <= 4
-        return self.size() <= 7
+        empty_size = len(self.languages) * 4
+        return self.size() <= empty_size
 
     def shrink(self, n):
         best_words = self.word2count.most_common(n)
-        self.index2word = ["<pad>", "</b>", "</s>", "<unk>"]
-        self.word2index = {}
-        self.word2count = Counter()
+        self.reset()
         for word, count in best_words:
-            self.add_word(word)
+            language, word = word.split("-", maxsplit=1)
+            self.add_word(word, language)
             self.word2count[word] = count
 
     def reset(self):
-        self.word2index = {}
         self.word2count = Counter()
-        self.index2word = ["<pad>", "</b>", "</s>", "<unk>"]
+        self.index2word = []
+        for language in self.languages:
+            self.index2word += [language + "-<pad>", language + "-<sos>",
+                                language + "-<eos>", language + "-<unk>"]
+        self.word2index = {word: index for index, word in enumerate(self.index2word)}
 
     def save(self, path) -> None:
         with open(path, "wb") as f:
@@ -104,12 +87,49 @@ class Vocabulary:
             vocab = pickle.load(f)
             self.__dict__.update(vocab.__dict__)
 
+    def get_indices(self, sentence: str, language: str) -> List[int]:
+        return [self.get_index(word, language) for word in sentence.strip().split()] + [self.get_eos(language)]
+
+    def pad_indices(self, indices: List[int], max_length: int, language: str):
+        return indices + [self.get_pad(language) for _ in range(max_length - len(indices))]
+
     @staticmethod
-    def merge(vocab1, vocab2, path):
-        vocab = Vocabulary(language="all", path=path)
-        vocab.index2word = ["<pad>"]
-        vocab.index2word += ["src-" + word for word in vocab1.index2word[1:]]
-        vocab.index2word += ["tgt-" + word for word in vocab2.index2word[1:]]
-        vocab.word2index = {word: index for index, word in enumerate(vocab.index2word)}
-        vocab.word2count = Counter(vocab.index2word)
-        return vocab
+    def merge(vocab1, vocab2):
+        return Vocabulary(languages=vocab1.languages + vocab2.languages)
+
+
+def collect_vocabularies(src_vocabulary_path: str, tgt_vocabulary_path: str, all_vocabulary_path: str,
+                         src_file_names: Tuple[str]=(), tgt_file_names: Tuple[str]=(), src_max_words: int=40000,
+                         tgt_max_words: int=40000, reset: bool=True):
+    print("Collecting vocabulary...")
+    src_vocabulary = Vocabulary(languages=["src"])
+    tgt_vocabulary = Vocabulary(languages=["tgt"])
+    vocabulary = Vocabulary(languages=["src", "tgt"])
+
+    src_vocabulary.load(src_vocabulary_path)
+    tgt_vocabulary.load(tgt_vocabulary_path)
+    vocabulary.load(all_vocabulary_path)
+
+    if not reset:
+        return src_vocabulary, tgt_vocabulary, vocabulary
+
+    assert len(src_file_names) != 0 and len(tgt_file_names) != 0
+
+    src_vocabulary.reset()
+    tgt_vocabulary.reset()
+    vocabulary.reset()
+
+    for filename in src_file_names:
+        src_vocabulary.add_file(filename, "src")
+    src_vocabulary.shrink(src_max_words)
+    src_vocabulary.save(src_vocabulary_path)
+
+    for filename in tgt_file_names:
+        tgt_vocabulary.add_file(filename, "tgt")
+    tgt_vocabulary.shrink(tgt_max_words)
+    tgt_vocabulary.save(tgt_vocabulary_path)
+
+    vocabulary = Vocabulary.merge(src_vocabulary, tgt_vocabulary)
+    vocabulary.save(all_vocabulary_path)
+    assert vocabulary.size() == src_vocabulary.size() + tgt_vocabulary.size()
+    return src_vocabulary, tgt_vocabulary, vocabulary

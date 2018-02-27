@@ -1,3 +1,7 @@
+import logging
+import numpy as np
+from gensim.models.keyedvectors import KeyedVectors
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,12 +9,14 @@ from torch.autograd import Variable
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 
+from utils.vocabulary import Vocabulary
+
 
 class EncoderRNN(nn.Module):
-    def __init__(self, input_size, embedding_dim, hidden_size, n_layers=3, dropout=0.3):
+    def __init__(self, input_size, embedding_dim, hidden_size, n_layers=3, dropout=0.3, bidirectional=True):
         super(EncoderRNN, self).__init__()
 
-        num_directions = 2
+        num_directions = 2 if bidirectional else 1
         assert hidden_size % num_directions == 0
         hidden_size = hidden_size // num_directions
 
@@ -19,19 +25,22 @@ class EncoderRNN(nn.Module):
         self.hidden_size = hidden_size
         self.n_layers = n_layers
         self.dropout = dropout
+        self.bidirectional = bidirectional
 
         self.embedding = nn.Embedding(input_size, embedding_dim)
-        self.rnn = nn.LSTM(embedding_dim, hidden_size, n_layers, dropout=dropout, bidirectional=True)
+        self.rnn = nn.LSTM(embedding_dim, hidden_size, n_layers, dropout=dropout, bidirectional=bidirectional)
 
-    def forward(self, input_seqs, input_lengths, hidden=None):
+    def forward(self, input_seqs, input_lengths):
         embedded = self.embedding(input_seqs)
 
         packed = pack(embedded, input_lengths)
-        outputs, hidden = self.rnn(packed, hidden)
+        outputs, hidden = self.rnn(packed, None)
         outputs, output_lengths = unpack(outputs)
 
-        n = hidden[0].size(0)
-        hidden = (torch.cat([hidden[0][0:n:2], hidden[0][1:n:2]], 2), torch.cat([hidden[1][0:n:2], hidden[1][1:n:2]], 2))
+        if self.bidirectional:
+            n = hidden[0].size(0)
+            hidden = (torch.cat([hidden[0][0:n:2], hidden[0][1:n:2]], 2),
+                      torch.cat([hidden[1][0:n:2], hidden[1][1:n:2]], 2))
         return outputs, hidden
 
 
@@ -93,23 +102,7 @@ class AttnDecoderRNN(nn.Module):
         self.embedding = nn.Embedding(output_size, embedding_dim)
         self.attn = Attn(hidden_size)
         self.rnn = nn.LSTM(hidden_size + embedding_dim, hidden_size, n_layers, dropout=dropout)
-
-    def forward(self, input_seq, hidden, encoder_outputs, context):
-        # hidden: S = n_layers x B x N
-        # encoder_outputs: S = L x B x N
-        embedded = self.embedding(input_seq).unsqueeze(0)  # S = 1 x B x E
-
-        # Combine embedded input word and attended context, run through RNN (input feeding)
-        rnn_input = torch.cat((embedded, context), 2)
-        output, hidden = self.rnn(rnn_input, hidden)
-
-        # Calculate attention weights and apply to encoder outputs
-        output, attn_weights = self.attn(output, encoder_outputs)
-        assert output.size(2) == self.hidden_size
-        # output: # S = 1 x B x N
-
-        # Return final output, hidden state, and attention weights (for visualization)
-        return output, hidden, attn_weights
+        self.generator = Generator(hidden_size, output_size)
 
     def init_state(self, encoder_outputs, sos_index):
         max_encoder_length = encoder_outputs.size(0)
@@ -119,18 +112,50 @@ class AttnDecoderRNN(nn.Module):
         initial_input = torch.add(initial_input, sos_index)
         initial_input = initial_input.cuda() if self.use_cuda else initial_input
 
-        attn_weights = Variable(torch.zeros(batch_size, max_encoder_length)).unsqueeze(1)  # S = B x 1 x L
+        attn_weights = Variable(torch.zeros(batch_size, max_encoder_length)).unsqueeze(1)  # B x 1 x L
         attn_weights = torch.add(attn_weights, 1.0 / max_encoder_length)
         attn_weights = attn_weights.cuda() if self.use_cuda else attn_weights
-        initial_context = attn_weights.bmm(encoder_outputs.transpose(0, 1)).transpose(0, 1)  # S = 1 x B x N
+
+        initial_context = attn_weights.bmm(encoder_outputs.transpose(0, 1)).transpose(0, 1)  # 1 x B x N
         initial_context = initial_context.cuda() if self.use_cuda else initial_context
         initial_context = initial_context.detach()
 
         return initial_input, initial_context
 
+    def step(self, batch_input, hidden, context, encoder_output):
+        # batch_input: B
+        # hidden: n_layers x B x N
+        # encoder_output: 1 x B x N
+        # output: 1 x B x N
+        # embedded:  1 x B x E
+        embedded = self.embedding(batch_input).unsqueeze(0)
+        rnn_input = torch.cat((embedded, context), 2)
+        output, hidden = self.rnn(rnn_input, hidden)
+        output, attn_weights = self.attn.forward(output, encoder_output)
+        return output, hidden, attn_weights
+
+    def forward(self, current_input, context, hidden, length, encoder_output):
+        batch_size = encoder_output.size(1)
+        padded_encoder_output = Variable(torch.zeros((length, batch_size, self.hidden_size)).type(torch.FloatTensor))
+        padded_encoder_output = padded_encoder_output.cuda() if self.use_cuda else padded_encoder_output
+        for i in range(encoder_output.size(0)):
+            padded_encoder_output[i] = encoder_output[i]
+
+        outputs = Variable(torch.zeros(length, current_input.size(0), self.output_size))
+        outputs = outputs.cuda() if self.use_cuda else outputs
+
+        for t in range(length):
+            output, hidden, _ = self.step(current_input, hidden, context, encoder_output)
+            context = output
+            scores = self.generator.forward(output.squeeze(0))
+            top_indices = scores.topk(1, dim=1)[1].view(-1)
+            current_input = top_indices
+            outputs[t] = scores
+        return outputs, hidden
+
 
 class Discriminator(nn.Module):
-    def __init__(self, max_length, encoder_hidden_size, hidden_size=1024, n_layers=3):
+    def __init__(self, max_length, encoder_hidden_size, hidden_size, n_layers):
         super(Discriminator, self).__init__()
 
         self.encoder_hidden_size = encoder_hidden_size
@@ -141,7 +166,7 @@ class Discriminator(nn.Module):
         layers = list()
         layers.append(nn.Linear(encoder_hidden_size * max_length, hidden_size))
         layers.append(nn.LeakyReLU())
-        for i in range(n_layers - 1):
+        for i in range(n_layers - 2):
             layers.append(nn.Linear(hidden_size, hidden_size))
             layers.append(nn.LeakyReLU())
         self.layers = nn.ModuleList(layers)
@@ -158,3 +183,81 @@ class Discriminator(nn.Module):
             output = self.layers[i](output)
             output = self.activation(output)
         return self.sigmoid(self.out(output))
+
+
+class Seq2Seq(nn.Module):
+    def __init__(self, embedding_dim, rnn_size, output_size, encoder_n_layers, decoder_n_layers, dropout,
+                 max_length, use_cuda, enable_embedding_training, bidirectional):
+        super(Seq2Seq, self).__init__()
+
+        self.embedding_dim = embedding_dim
+        self.output_size = output_size
+        self.rnn_size = rnn_size
+        self.encoder_n_layers = encoder_n_layers
+        self.decoder_n_layers = decoder_n_layers
+        self.dropout = dropout
+        self.max_length = max_length
+        self.use_cuda = use_cuda
+        self.bidirectional = bidirectional
+
+        self.encoder = EncoderRNN(self.all_size, embedding_dim, rnn_size, dropout=dropout,
+                                  n_layers=encoder_n_layers, bidirectional=bidirectional)
+        self.decoder = AttnDecoderRNN(embedding_dim, rnn_size, self.output_size, dropout=dropout,
+                                      max_length=max_length, n_layers=decoder_n_layers, use_cuda=use_cuda)
+
+        self.encoder.embedding.weight.requires_grad = enable_embedding_training
+        self.decoder.embedding.weight.requires_grad = enable_embedding_training
+
+    def load_embeddings(self, src_embeddings, tgt_embeddings, vocabulary: Vocabulary):
+        aligned_embeddings = torch.div(torch.randn(vocabulary.size(), 300), 10)
+        for i in range(len(vocabulary.index2word)):
+            word = vocabulary.get_word(i)
+            language = vocabulary.get_language(i)
+            if language == "src" and word in src_embeddings.wv:
+                aligned_embeddings[i] = torch.FloatTensor(src_embeddings.wv[word])
+            if language == "tgt" and word in tgt_embeddings.wv:
+                aligned_embeddings[i] = torch.FloatTensor(tgt_embeddings.wv[word])
+
+        enable_training = self.encoder.embedding.weight.requires_grad
+        self.encoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
+        self.decoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
+
+    def forward(self, variable, lengths, sos_index):
+        encoder_output, encoder_hidden = self.encoder.forward(variable, lengths)
+        current_input, context = self.decoder.init_state(encoder_output, sos_index)
+        decoder_output, _ = self.decoder.forward(current_input, context, encoder_hidden, max(lengths), encoder_output)
+
+        return encoder_output, decoder_output
+
+
+def build_model(*, rnn_size, output_size, encoder_n_layers, decoder_n_layers, discriminator_hidden_size, dropout,
+                max_length, use_cuda, enable_embedding_training):
+    logging.info("Building model...")
+    model = Seq2Seq(embedding_dim=300,
+                    rnn_size=rnn_size,
+                    output_size=output_size,
+                    use_cuda=use_cuda,
+                    encoder_n_layers=encoder_n_layers,
+                    decoder_n_layers=decoder_n_layers,
+                    enable_embedding_training=enable_embedding_training,
+                    max_length=max_length,
+                    dropout=dropout)
+    discriminator = Discriminator(max_length=max_length,
+                                  encoder_hidden_size=rnn_size,
+                                  hidden_size=discriminator_hidden_size,
+                                  n_layers=3)
+    return model, discriminator
+
+
+def load_embeddings(model, src_embeddings_filename, tgt_embeddings_filename, vocabulary):
+    logging.info("Loading embeddings...")
+    src_word_vectors = KeyedVectors.load_word2vec_format(src_embeddings_filename, binary=False)
+    tgt_word_vectors = KeyedVectors.load_word2vec_format(tgt_embeddings_filename, binary=False)
+    model.load_embeddings(src_word_vectors, tgt_word_vectors, vocabulary)
+
+
+def print_summary(model):
+    logging.info(model)
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    params = sum([np.prod(p.size()) for p in model_parameters])
+    logging.info("Params: ", params)

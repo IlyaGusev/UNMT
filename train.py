@@ -1,9 +1,16 @@
 import argparse
+import copy
+import sys
+import logging
 
-import time
 import torch
+
 from src.trainer import Trainer
 from src.translator import Translator
+from src.models import build_model, load_embeddings
+from src.word_by_word import WordByWordModel
+from utils.vocabulary import collect_vocabularies
+from src.serialize import load_model
 
 
 def train_opts(parser):
@@ -123,87 +130,90 @@ train_opts(parser)
 opt = parser.parse_args()
 
 
-def init_zero_model(state, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=None,
+def init_zero_model(vocabulary, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=None,
                     bootstrapped_model_path=None, train_src_bi=None, train_tgt_bi=None, supervised_epochs=5,
                     batch_size=32, n_supervised_batches=None, print_every=1000, save_every=1000,
-                    save_file: str="model"):
+                    save_file: str="model", max_length=50):
     if src_to_tgt_dict is not None and tgt_to_src_dict is not None:
-        zero_model = state.build_word_by_word_model(src_to_tgt_dict_filename=opt.src_to_tgt_dict,
-                                                    tgt_to_src_dict_filename=opt.tgt_to_src_dict)
+        zero_model = WordByWordModel(src_to_tgt_dict_filename=opt.src_to_tgt_dict,
+                                     tgt_to_src_dict_filename=opt.tgt_to_src_dict,
+                                     all_vocabulary=vocabulary, max_length=max_length)
     elif bootstrapped_model_path is not None:
-        state.load(bootstrapped_model_path)
-        state.model = state.model.cuda() if use_cuda else state.model
-        zero_model = state.model
+        zero_model, discriminator, _, _ = load_model(bootstrapped_model_path, use_cuda)
         for param in zero_model.parameters():
             param.requires_grad = False
     elif train_src_bi is not None and train_tgt_bi is not None:
-        pair_filenames = [(train_src_bi, train_tgt_bi), ]
-        reverted_pairs = [(pair[1], pair[0]) for pair in pair_filenames]
-        for big_epoch in range(supervised_epochs):
-            parallel_forward_batches = \
-                state.get_bilingual_batches(pair_filenames, "src", batch_size, n=n_supervised_batches)
-            reverted_batches = state.get_bilingual_batches(reverted_pairs, "tgt", batch_size, n=n_supervised_batches)
-            timer = time.time()
-            print_loss_total = 0
-            epoch = 0
-            for batch, reverted_batch in zip(parallel_forward_batches, reverted_batches):
-                state.model.train()
-                loss = state.train_bilingual_batch(batch, reverted_batch)
+        model, discriminator = build_model(
+            max_length=50,
+            output_size=vocabulary.size(),
+            rnn_size=opt.rnn_size,
+            encoder_n_layers=opt.layers,
+            decoder_n_layers=opt.layers,
+            dropout=0.3,
+            use_cuda=use_cuda,
+            enable_embedding_training=bool(opt.enable_embedding_training),
+            discriminator_hidden_size=8)
 
-                print_loss_total += loss
-                if epoch % save_every == 0 and epoch != 0:
-                    state.save(save_file + "_supervised.pt")
-                if epoch % print_every == 0 and epoch != 0:
-                    print_loss_avg = print_loss_total / print_every
-                    print_loss_total = 0
-                    diff = time.time() - timer
-                    timer = time.time()
-                    print('%s big epoch, %s epoch, %s sec, %.4f main loss' %
-                          (big_epoch, epoch, diff, print_loss_avg))
-                epoch += 1
-            state.save(save_file + "_supervised.pt")
-        zero_model = state.model
+        load_embeddings(model,
+                        src_embeddings_filename=opt.src_embeddings,
+                        tgt_embeddings_filename=opt.tgt_embeddings,
+                        vocabulary=vocabulary)
+        model = model.cuda() if use_cuda else model
+
+        trainer = Trainer(opt.src_lang, opt.tgt_lang,
+                          use_cuda=use_cuda,
+                          discriminator_lr=opt.discriminator_lr,
+                          main_lr=opt.learning_rate,
+                          main_betas=(opt.adam_beta1, 0.999), )
+        pair_file_names = [(train_src_bi, train_tgt_bi), ]
+        trainer.train_supervised(model, pair_file_names, vocabulary, batch_size=batch_size, max_len=max_length,
+                                 save_file=save_file, big_epochs=supervised_epochs, print_every=print_every,
+                                 save_every=save_every, max_batch_count=n_supervised_batches)
+        zero_model = Translator(model, vocabulary, use_cuda)
     else:
         raise ValueError('Zero Model was not initialized')
     return zero_model
 
 
 def main():
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     use_cuda = torch.cuda.is_available()
     print("Use CUDA: ", use_cuda)
-    state = Trainer(opt.src_lang, opt.tgt_lang, use_cuda=use_cuda)
-    if opt.load_from is None and opt.bootstrapped_model is None:
-        state.init_model(
-            src_filenames=[opt.train_src_mono, ],
-            tgt_filenames=[opt.train_tgt_mono, ],
-            src_embeddings_filename=opt.src_embeddings,
-            tgt_embeddings_filename=opt.tgt_embeddings,
-            src_max_words=opt.src_vocab_size,
-            tgt_max_words=opt.tgt_vocab_size,
-            hidden_size=opt.rnn_size,
-            n_layers=opt.layers,
-            discriminator_lr=opt.discriminator_lr,
-            main_lr=opt.learning_rate,
-            main_betas=(opt.adam_beta1, 0.999),
-            discriminator_hidden_size=opt.discriminator_hidden_size,
+    trainer = Trainer(opt.src_lang, opt.tgt_lang,
+                      use_cuda=use_cuda,
+                      discriminator_lr=opt.discriminator_lr,
+                      main_lr=opt.learning_rate,
+                      main_betas=(opt.adam_beta1, 0.999),)
+
+    _, _, vocabulary = collect_vocabularies(
             src_vocabulary_path=opt.src_vocabulary,
             tgt_vocabulary_path=opt.tgt_vocabulary,
             all_vocabulary_path=opt.all_vocabulary,
-            enable_embedding_training=opt.enable_embedding_training,
-            reset_vocabularies=bool(opt.reset_vocabularies))
-    else:
-        state.collect_vocabularies(
-            src_vocabulary_path=opt.src_vocabulary,
-            tgt_vocabulary_path=opt.tgt_vocabulary,
-            all_vocabulary_path=opt.all_vocabulary,
-            src_filenames=[opt.train_src_mono, ],
-            tgt_filenames=[opt.train_tgt_mono, ],
+            src_file_names=(opt.train_src_mono, ),
+            tgt_file_names=(opt.train_tgt_mono, ),
             src_max_words=opt.src_vocab_size,
             tgt_max_words=opt.tgt_vocab_size,
             reset=bool(opt.reset_vocabularies))
-        state.init_criterions()
 
-    zero_model = init_zero_model(state, use_cuda,
+    model, discriminator = build_model(
+        max_length=50,
+        output_size=vocabulary.size(),
+        rnn_size=opt.rnn_size,
+        encoder_n_layers=opt.layers,
+        decoder_n_layers=opt.layers,
+        dropout=0.3,
+        use_cuda=use_cuda,
+        enable_embedding_training=bool(opt.enable_embedding_training),
+        discriminator_hidden_size=opt.discriminator_hidden_size)
+
+    load_embeddings(model,
+                    src_embeddings_filename=opt.src_embeddings,
+                    tgt_embeddings_filename=opt.tgt_embeddings,
+                    vocabulary=vocabulary)
+    model = model.cuda() if use_cuda else model
+    discriminator = discriminator.cuda() if use_cuda else discriminator
+
+    zero_model = init_zero_model(vocabulary, use_cuda,
                                  src_to_tgt_dict=opt.src_to_tgt_dict,
                                  tgt_to_src_dict=opt.tgt_to_src_dict,
                                  bootstrapped_model_path=opt.bootstrapped_model,
@@ -215,20 +225,23 @@ def main():
                                  print_every=opt.print_every,
                                  save_every=opt.save_every,
                                  save_file=opt.save_model)
-    state.current_translation_model = zero_model
+    trainer.current_translation_model = zero_model
 
     if opt.load_from:
-        state.load(opt.load_from)
-        state.model = state.model.cuda() if use_cuda else state.model
+        model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.load_from, use_cuda)
+        trainer.main_optimizer = main_optimizer
+        trainer.discriminator_optimizer = discriminator_optimizer
 
-    state.train([opt.train_src_mono, ], [opt.train_tgt_mono, ],
-                unsupervised_big_epochs=opt.unsupervised_epochs,
-                batch_size=opt.batch_size,
-                print_every=opt.print_every,
-                save_every=opt.save_every,
-                save_file=opt.save_model,
-                n_unsupervised_batches=opt.n_unsupervised_batches,
-                enable_unsupervised_backtranslation=opt.enable_unsupervised_backtranslation)
+    trainer.train(model, discriminator,
+                  src_file_names=[opt.train_src_mono, ],
+                  tgt_file_names=[opt.train_tgt_mono, ],
+                  unsupervised_big_epochs=opt.unsupervised_epochs,
+                  batch_size=opt.batch_size,
+                  print_every=opt.print_every,
+                  save_every=opt.save_every,
+                  save_file=opt.save_model,
+                  n_unsupervised_batches=opt.n_unsupervised_batches,
+                  enable_unsupervised_backtranslation=opt.enable_unsupervised_backtranslation)
 
 
 if __name__ == "__main__":
