@@ -21,7 +21,7 @@ class Translator:
         words = []
         for i in translated:
             word = self.vocabulary.get_word(i)
-            if word == "</s>" or word == "<pad>":
+            if word == "<eos>" or word == "<pad>":
                 break
             words.append(word)
         return " ".join(words)
@@ -29,13 +29,12 @@ class Translator:
     def translate(self, variable, lengths, sos_index):
         self.model.eval()
         _, decoder_output = self.model.forward(variable, lengths, sos_index)
-
         max_length = max(lengths)
         batch_size = variable.size(1)
 
-        output_variable = Variable(torch.zeros(max_length + 1, batch_size).type(torch.LongTensor))
+        output_variable = Variable(torch.zeros(max_length, batch_size).type(torch.LongTensor))
         output_variable = output_variable.cuda() if self.use_cuda else output_variable
-        for t in range(max_length + 1):
+        for t in range(max_length):
             output_variable[t] = decoder_output[t].topk(1, dim=1)[1].view(-1)
 
         output_variable = output_variable.detach()
@@ -50,7 +49,7 @@ class Translator:
         return self.translate(variable, lengths, sos_index)
 
     def sentence_to_variable(self, sentence, lang):
-        indices = self.vocabulary.get_indices(sentence, lang)
+        indices = self.vocabulary.get_indices(sentence, lang)[:self.model.max_length]
         variable = Variable(torch.zeros(1, len(indices))).type(torch.LongTensor)
         indices = Variable(torch.LongTensor(indices))
         variable[0] = indices

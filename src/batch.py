@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import torch
+import copy
 from torch.autograd import Variable
 
 from utils.vocabulary import Vocabulary
@@ -22,12 +23,18 @@ class Batch:
 
     @staticmethod
     def sort_pair(src_batch: 'Batch', tgt_batch: 'Batch') -> Tuple['Batch', 'Batch']:
-        pairs = sorted(zip(src_batch.variable.data, tgt_batch.variable.data), key=lambda s: len(s[0]), reverse=True)
-        src_sequences, tgt_sequences = zip(*pairs)
+        batch_size = src_batch.variable.size(1)
+        src_data = src_batch.variable.transpose(0, 1).data.cpu()
+        tgt_data = tgt_batch.variable.transpose(0, 1).data.cpu()
+        tuples = sorted([(list(src_data[b]), list(tgt_data[b]), src_batch.lengths[b], tgt_batch.lengths[b]) 
+                         for b in range(batch_size)],
+                        key=lambda t: t[2], reverse=True)
+        src_sequences = [copy.deepcopy(t[0]) for t in tuples]
+        tgt_sequences = [copy.deepcopy(t[1]) for t in tuples]
+        src_lengths = [copy.deepcopy(t[2]) for t in tuples]
+        tgt_lengths = [copy.deepcopy(t[3]) for t in tuples]
         src_variable = BatchGenerator.get_variable(src_sequences)
         tgt_variable = BatchGenerator.get_variable(tgt_sequences)
-        src_lengths = BatchGenerator.get_lengths(src_sequences)
-        tgt_lengths = BatchGenerator.get_lengths(tgt_sequences)
         return Batch(src_variable, src_lengths), Batch(tgt_variable, tgt_lengths)
 
 
@@ -79,7 +86,7 @@ class BatchGenerator:
 
     @staticmethod
     def get_variable(sequences: List[List[int]]):
-        return Variable(torch.LongTensor(sequences), requires_grad=False)
+        return Variable(torch.LongTensor(sequences), requires_grad=False).transpose(0, 1)
 
     def pad(self, sequences: List[List[int]], lengths: List[int]):
         return [self.vocabulary.pad_indices(indices, max(lengths), self.language) for indices in sequences]
@@ -94,12 +101,35 @@ class BilingualBatchGenerator:
         self.vocabulary = vocabulary  # type: Vocabulary
         self.languages = languages  # type: List[str]
         self.max_batch_count = max_batch_count  # type: int
-
+        
     def __iter__(self):
-        src_file_names, tgt_file_names = zip(*self.pair_file_names)
-        src_batch_generator = BatchGenerator(src_file_names, self.batch_size, self.max_len,
-                                             self.vocabulary, self.languages[0], False, self.max_batch_count)
-        tgt_batch_generator = BatchGenerator(tgt_file_names, self.batch_size, self.max_len,
-                                             self.vocabulary, self.languages[1], False, self.max_batch_count)
-        for src_batch, tgt_batch in zip(src_batch_generator, tgt_batch_generator):
-            yield Batch.sort_pair(src_batch, tgt_batch)
+        batch_count = 0
+        for src_file_name, tgt_file_name in self.pair_file_names:
+            src_seqs = []
+            tgt_seqs = []
+            with open(src_file_name, "r", encoding='utf-8') as src, open(tgt_file_name, "r", encoding='utf-8') as tgt:
+                for src_sentence, tgt_sentence in zip(src, tgt):
+                    src_indices = self.vocabulary.get_indices(src_sentence, self.languages[0])
+                    tgt_indices = self.vocabulary.get_indices(tgt_sentence, self.languages[1])
+                    if len(src_indices) > self.max_len or len(tgt_indices) > self.max_len:
+                        continue
+                    src_seqs.append(src_indices)
+                    tgt_seqs.append(tgt_indices)
+                    if len(src_seqs) == self.batch_size:
+                        yield Batch.sort_pair(self.process(src_seqs, self.languages[0]), self.process(tgt_seqs, self.languages[1]))
+                        batch_count += 1
+                        if self.max_batch_count is not None and batch_count == self.max_batch_count:
+                            return
+                        src_seqs = []
+                        tgt_seqs = []
+            if len(src_seqs) == self.batch_size:
+                yield Batch.sort_pair(self.process(src_seqs, self.languages[0]), self.process(tgt_seqs, self.languages[1]))
+    
+    def process(self, sequences: List[List[int]], language: str):
+        lengths = BatchGenerator.get_lengths(sequences)
+        sequences = self.pad(sequences, lengths, language)
+        variable = BatchGenerator.get_variable(sequences)
+        return Batch(variable, lengths)
+    
+    def pad(self, sequences: List[List[int]], lengths: List[int], language: str):
+        return [self.vocabulary.pad_indices(indices, max(lengths), language) for indices in sequences]

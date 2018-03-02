@@ -1,8 +1,11 @@
 import argparse
+import logging
+import sys
 
 import torch
-from src.trainer import Trainer
 from src.translator import Translator
+from utils.vocabulary import collect_vocabularies
+from src.serialize import load_model
 
 
 def translate_opts(parser):
@@ -50,24 +53,26 @@ opt = parser.parse_args()
 
 
 def main():
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     use_cuda = torch.cuda.is_available()
-    print("Use CUDA: ", use_cuda)
-    state = Trainer(opt.src_lang, opt.tgt_lang, use_cuda=use_cuda)
-    state.collect_vocabularies(src_vocabulary_path=opt.src_vocabulary,
-                               tgt_vocabulary_path=opt.tgt_vocabulary,
-                               all_vocabulary_path=opt.all_vocabulary)
-    state.load(opt.model)
-    state.model = state.model.cuda() if use_cuda else state.model
+    logging.info("Use CUDA: " + str(use_cuda))
+  
+    _, _, vocabulary = collect_vocabularies(
+            src_vocabulary_path=opt.src_vocabulary,
+            tgt_vocabulary_path=opt.tgt_vocabulary,
+            all_vocabulary_path=opt.all_vocabulary, 
+            reset=False)
+    model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.model, use_cuda)
     input_filename = opt.input
     output_filename = opt.output
     lang = opt.lang
     tgt_lang = "src" if lang == "tgt" else "tgt"
-    print("Writing output...")
+    translator = Translator(model, vocabulary, use_cuda)
+    logging.info("Writing output...")
     with open(input_filename, "r", encoding="utf-8") as r, open(output_filename, "w", encoding="utf-8") as w:
         for line in r:
-            translated = Translator.translate(state.model, line, lang, tgt_lang,
-                                              state.all_vocabulary, use_cuda)
-            # print(translated)
+            translated = translator.translate_sentence(line, lang, tgt_lang)
+            logging.debug(translated)
             w.write(translated+"\n")
 
 if __name__ == "__main__":

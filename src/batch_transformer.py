@@ -11,19 +11,20 @@ class BatchTransformer:
     @staticmethod
     def noise(batch: Batch, pad_index: int, drop_probability: float=0.1,
               shuffle_max_distance: int=3) -> Batch:
-        new_variable = BatchTransformer.add_noise(batch.variable, pad_index, drop_probability, shuffle_max_distance)
+        new_variable = BatchTransformer.add_noise(batch.variable.transpose(0, 1), pad_index, 
+                                                  drop_probability, shuffle_max_distance)
         new_lengths = BatchTransformer.get_lengths(new_variable, pad_index)
         new_variable = new_variable[:, :max(new_lengths)]
-        new_batch = Batch(new_variable, new_lengths)
+        new_batch = Batch(new_variable.transpose(0, 1), new_lengths)
         return new_batch
 
     @staticmethod
     def translate(batch: Batch, src_pad_index: int, tgt_pad_index: int, translation_func: Callable) -> Batch:
-        new_variable = translation_func(variable=batch.variable,
+        new_variable = translation_func(variable=batch.variable.transpose(0, 1),
                                         lengths=BatchTransformer.get_lengths(batch.variable, src_pad_index))
         new_lengths = BatchTransformer.get_lengths(new_variable, tgt_pad_index)
         new_variable = new_variable[:, :max(new_lengths)]
-        new_batch = Batch(new_variable, new_lengths)
+        new_batch = Batch(new_variable.transpose(0, 1), new_lengths)
         return new_batch
 
     @staticmethod

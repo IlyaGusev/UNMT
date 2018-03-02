@@ -1,6 +1,7 @@
 from collections import Counter
 from typing import List, Tuple
 import pickle
+import logging
 
 
 class Vocabulary:
@@ -95,13 +96,22 @@ class Vocabulary:
 
     @staticmethod
     def merge(vocab1, vocab2):
-        return Vocabulary(languages=vocab1.languages + vocab2.languages)
+        vocabulary = Vocabulary(languages=vocab1.languages + vocab2.languages)
+        for i in range(vocab1.size()):
+            language = vocab1.get_language(i)
+            word = vocab1.get_word(i)
+            vocabulary.add_word(word, language)
+        for i in range(vocab2.size()):
+            language = vocab2.get_language(i)
+            word = vocab2.get_word(i)
+            vocabulary.add_word(word, language)
+        return vocabulary
 
 
 def collect_vocabularies(src_vocabulary_path: str, tgt_vocabulary_path: str, all_vocabulary_path: str,
                          src_file_names: Tuple[str]=(), tgt_file_names: Tuple[str]=(), src_max_words: int=40000,
                          tgt_max_words: int=40000, reset: bool=True):
-    print("Collecting vocabulary...")
+    logging.info("Collecting vocabulary...")
     src_vocabulary = Vocabulary(languages=["src"])
     tgt_vocabulary = Vocabulary(languages=["tgt"])
     vocabulary = Vocabulary(languages=["src", "tgt"])

@@ -1,7 +1,15 @@
 import torch
+from torch import optim
+import logging
 
 from src.models import Seq2Seq, Discriminator, build_model
-from src.trainer import init_optimizers
+
+def init_optimizers(model: Seq2Seq, discriminator: Discriminator,
+                    discriminator_lr=0.0005, main_lr=0.0003, main_betas=(0.5, 0.999)):
+    logging.info("Initializing optimizers...")
+    main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=main_lr, betas=main_betas)
+    discriminator_optimizer = optim.RMSprop(discriminator.parameters(), lr=discriminator_lr)
+    return main_optimizer, discriminator_optimizer
 
 
 def save_model(model: Seq2Seq, discriminator: Discriminator, main_optimizer, discriminator_optimizer, filename):

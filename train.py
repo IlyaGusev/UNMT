@@ -7,7 +7,7 @@ import torch
 
 from src.trainer import Trainer
 from src.translator import Translator
-from src.models import build_model, load_embeddings
+from src.models import build_model, load_embeddings, print_summary
 from src.word_by_word import WordByWordModel
 from utils.vocabulary import collect_vocabularies
 from src.serialize import load_model
@@ -52,7 +52,7 @@ def train_opts(parser):
                        help='Pretrained word embeddings for src language.')
     group.add_argument('-tgt_embeddings', type=str, default=None,
                        help='Pretrained word embeddings for tgt language.')
-    group.add_argument('-enable_embedding_training', type=bool, default=False,
+    group.add_argument('-enable_embedding_training', type=int, default=0,
                        help='Enable embedding training.')
 
     # Zero Model Options
@@ -151,22 +151,25 @@ def init_zero_model(vocabulary, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=
             decoder_n_layers=opt.layers,
             dropout=0.3,
             use_cuda=use_cuda,
-            enable_embedding_training=bool(opt.enable_embedding_training),
+            enable_embedding_training=False,
             discriminator_hidden_size=8)
-
-        load_embeddings(model,
-                        src_embeddings_filename=opt.src_embeddings,
-                        tgt_embeddings_filename=opt.tgt_embeddings,
-                        vocabulary=vocabulary)
+        if opt.src_embeddings is not None:
+            load_embeddings(model,
+                            src_embeddings_filename=opt.src_embeddings,
+                            tgt_embeddings_filename=opt.tgt_embeddings,
+                            vocabulary=vocabulary)
         model = model.cuda() if use_cuda else model
+        discriminator = discriminator.cuda() if use_cuda else discriminator
+        print_summary(model)
 
-        trainer = Trainer(opt.src_lang, opt.tgt_lang,
+        trainer = Trainer(vocabulary,
+                          max_length=50,
                           use_cuda=use_cuda,
                           discriminator_lr=opt.discriminator_lr,
                           main_lr=opt.learning_rate,
                           main_betas=(opt.adam_beta1, 0.999), )
         pair_file_names = [(train_src_bi, train_tgt_bi), ]
-        trainer.train_supervised(model, pair_file_names, vocabulary, batch_size=batch_size, max_len=max_length,
+        trainer.train_supervised(model, discriminator, pair_file_names, vocabulary, batch_size=batch_size, max_len=max_length,
                                  save_file=save_file, big_epochs=supervised_epochs, print_every=print_every,
                                  save_every=save_every, max_batch_count=n_supervised_batches)
         zero_model = Translator(model, vocabulary, use_cuda)
@@ -178,13 +181,8 @@ def init_zero_model(vocabulary, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=
 def main():
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     use_cuda = torch.cuda.is_available()
-    print("Use CUDA: ", use_cuda)
-    trainer = Trainer(opt.src_lang, opt.tgt_lang,
-                      use_cuda=use_cuda,
-                      discriminator_lr=opt.discriminator_lr,
-                      main_lr=opt.learning_rate,
-                      main_betas=(opt.adam_beta1, 0.999),)
-
+    logging.info("Use CUDA: " + str(use_cuda))
+  
     _, _, vocabulary = collect_vocabularies(
             src_vocabulary_path=opt.src_vocabulary,
             tgt_vocabulary_path=opt.tgt_vocabulary,
@@ -194,25 +192,7 @@ def main():
             src_max_words=opt.src_vocab_size,
             tgt_max_words=opt.tgt_vocab_size,
             reset=bool(opt.reset_vocabularies))
-
-    model, discriminator = build_model(
-        max_length=50,
-        output_size=vocabulary.size(),
-        rnn_size=opt.rnn_size,
-        encoder_n_layers=opt.layers,
-        decoder_n_layers=opt.layers,
-        dropout=0.3,
-        use_cuda=use_cuda,
-        enable_embedding_training=bool(opt.enable_embedding_training),
-        discriminator_hidden_size=opt.discriminator_hidden_size)
-
-    load_embeddings(model,
-                    src_embeddings_filename=opt.src_embeddings,
-                    tgt_embeddings_filename=opt.tgt_embeddings,
-                    vocabulary=vocabulary)
-    model = model.cuda() if use_cuda else model
-    discriminator = discriminator.cuda() if use_cuda else discriminator
-
+    
     zero_model = init_zero_model(vocabulary, use_cuda,
                                  src_to_tgt_dict=opt.src_to_tgt_dict,
                                  tgt_to_src_dict=opt.tgt_to_src_dict,
@@ -225,7 +205,34 @@ def main():
                                  print_every=opt.print_every,
                                  save_every=opt.save_every,
                                  save_file=opt.save_model)
+    
+    trainer = Trainer(vocabulary,
+                      max_length=50,
+                      use_cuda=use_cuda,
+                      discriminator_lr=opt.discriminator_lr,
+                      main_lr=opt.learning_rate,
+                      main_betas=(opt.adam_beta1, 0.999),)
     trainer.current_translation_model = zero_model
+
+    model, discriminator = build_model(
+        max_length=50,
+        output_size=vocabulary.size(),
+        rnn_size=opt.rnn_size,
+        encoder_n_layers=opt.layers,
+        decoder_n_layers=opt.layers,
+        dropout=0.3,
+        use_cuda=use_cuda,
+        enable_embedding_training=bool(opt.enable_embedding_training),
+        discriminator_hidden_size=opt.discriminator_hidden_size)
+    if opt.src_embeddings is not None:
+        load_embeddings(model,
+                        src_embeddings_filename=opt.src_embeddings,
+                        tgt_embeddings_filename=opt.tgt_embeddings,
+                        vocabulary=vocabulary)
+    model = model.cuda() if use_cuda else model
+    print_summary(model)
+    print_summary(discriminator)
+    discriminator = discriminator.cuda() if use_cuda else discriminator
 
     if opt.load_from:
         model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.load_from, use_cuda)

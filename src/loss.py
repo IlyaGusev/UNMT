@@ -18,17 +18,15 @@ class DiscriminatorLossCompute:
 
 
 class MainLossCompute:
-    def __init__(self, generator: Generator, vocabulary: Vocabulary, use_cuda):
-        self.generator = generator
-
+    def __init__(self, vocabulary: Vocabulary, use_cuda):
         weight = torch.ones(vocabulary.size())
         weight[vocabulary.get_pad("src")] = 0
         weight[vocabulary.get_pad("tgt")] = 0
         weight = weight.cuda() if use_cuda else weight
         self.criterion = nn.NLLLoss(weight, size_average=False)
 
-    def compute(self, decoder_output, target):
-        scores = self.generator.forward(decoder_output)
-        target = target.view(-1)
-        loss = self.criterion(scores, target)
+    def compute(self, scores, target):
+        loss = 0
+        for t in range(target.size(0)):
+            loss += self.criterion(scores[t], target[t])
         return loss

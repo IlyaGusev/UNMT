@@ -16,15 +16,6 @@ from src.translator import Translator
 from src.serialize import save_model
 from utils.vocabulary import Vocabulary
 
-
-def init_optimizers(model: Seq2Seq, discriminator: Discriminator,
-                    discriminator_lr=0.0005, main_lr=0.0003, main_betas=(0.5, 0.999)):
-    logging.info("Initializing optimizers...")
-    main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=main_lr, betas=main_betas)
-    discriminator_optimizer = optim.RMSprop(discriminator.parameters(), lr=discriminator_lr)
-    return main_optimizer, discriminator_optimizer
-
-
 class Trainer:
     def __init__(self, vocabulary: Vocabulary, max_length: int=50, use_cuda: bool=True,
                  discriminator_lr=0.0005, main_lr=0.0003, main_betas=(0.5, 0.999)):
@@ -51,9 +42,9 @@ class Trainer:
               batch_size: int=32, n_unsupervised_batches: int=None, save_file: str="model",
               enable_unsupervised_backtranslation=False, max_len: int=50):
         if self.main_optimizer is None or self.discriminator_optimizer is None:
-            self.main_optimizer, self.discriminator_optimizer = \
-                init_optimizers(model, discriminator, discriminator_lr=self.discriminator_lr,
-                                main_lr=self.main_lr, main_betas=self.main_betas)
+            logging.info("Initializing optimizers...")
+            self.main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=self.main_lr, betas=self.main_betas)
+            self.discriminator_optimizer = optim.RMSprop(discriminator.parameters(), lr=self.discriminator_lr)
         self.adv_ones_variable = Variable(torch.add(torch.ones((batch_size,)), -0.1), requires_grad=False)
         self.adv_ones_variable = self.adv_ones_variable.cuda() if self.use_cuda else self.adv_ones_variable
         self.adv_zeros_variable = Variable(torch.add(torch.zeros((batch_size,)), 0.1), requires_grad=False)
@@ -124,14 +115,14 @@ class Trainer:
             Batch.sort_pair(BatchTransformer.translate(tgt_batch, self.vocabulary.get_pad("tgt"),
                                                        self.vocabulary.get_pad("src"), translation_func), tgt_batch)
 
-        logging.debug("Src noisy batch: ", input_batches["auto-src"])
-        logging.debug("Src old new batch: ", gtruth_batches["auto-src"])
-        logging.debug("Tgt noisy batch: ", input_batches["auto-tgt"])
-        logging.debug("Tgt old new batch: ", gtruth_batches["auto-tgt"])
-        logging.debug("Src noisy translated batch: ", input_batches["cd-src"])
-        logging.debug("Src old new untranslated batch: ", gtruth_batches["cd-src"])
-        logging.debug("Tgt noisy translated batch: ", input_batches["cd-tgt"])
-        logging.debug("Tgt old new untranslated batch: ", gtruth_batches["cd-tgt"])
+        logging.debug("Src noisy batch: " + str(input_batches["auto-src"]))
+        logging.debug("Src old new batch: "+ str(gtruth_batches["auto-src"]))
+        logging.debug("Tgt noisy batch: "+ str(input_batches["auto-tgt"]))
+        logging.debug("Tgt old new batch: "+ str(gtruth_batches["auto-tgt"]))
+        logging.debug("Src noisy translated batch: "+ str(input_batches["cd-src"]))
+        logging.debug("Src old new untranslated batch: "+ str(gtruth_batches["cd-src"]))
+        logging.debug("Tgt noisy translated batch: "+ str(input_batches["cd-tgt"]))
+        logging.debug("Tgt old new untranslated batch: "+ str(gtruth_batches["cd-tgt"]))
 
         for key in gtruth_batches:
             gtruth_batches[key] = gtruth_batches[key].cuda() if self.use_cuda else gtruth_batches[key]
@@ -171,11 +162,11 @@ class Trainer:
             sos_index = sos_indices[key]
             results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index)
 
-        main_loss_computer = MainLossCompute(model.generator, self.vocabulary, self.use_cuda)
+        main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         adv_loss_computer = DiscriminatorLossCompute(discriminator)
         losses = []
         for key, result in results.items():
-            main_loss = main_loss_computer.compute(result[1], gtruth_batches[key])
+            main_loss = main_loss_computer.compute(result[1], gtruth_batches[key].variable)
             adv_loss = adv_loss_computer.compute(result[0], adv_targets[key])
             losses += [main_loss, adv_loss]
         loss = sum(losses)
@@ -204,21 +195,30 @@ class Trainer:
         self.discriminator_optimizer.step()
         return discriminator_loss.data[0]
 
-    def train_supervised(self, model, pair_file_names, vocabulary: Vocabulary, *, batch_size, big_epochs, max_len,
+    def train_supervised(self, model, discriminator, pair_file_names, vocabulary: Vocabulary, *, batch_size, big_epochs, max_len,
                          max_batch_count=None, save_every=100, print_every=100, save_file="model"):
-        dummy_discriminator = Discriminator(max_len, model.rnn_size, 8, n_layers=1)
+        if self.main_optimizer is None:
+            logging.info("Initializing optimizers...")
+            self.main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
+                                             lr=self.main_lr, betas=self.main_betas)
+            self.discriminator_optimizer = optim.RMSprop(discriminator.parameters(), lr=self.discriminator_lr)
         for big_epoch in range(big_epochs):
             batch_gen = BilingualBatchGenerator(pair_file_names, batch_size, max_len, vocabulary,
                                                 languages=["src", "tgt"], max_batch_count=max_batch_count)
+            src_batch, tgt_batch = next(iter(batch_gen))
+            logging.debug("Src batch: " + str(src_batch))
+            logging.debug("Tgt batch: " + str(tgt_batch))
+            src_batch, tgt_batch = next(iter(batch_gen))
+            logging.debug("Src batch: " + str(src_batch))
+            logging.debug("Tgt batch: " + str(tgt_batch))
             timer = time.time()
             loss_total = 0
             epoch = 0
+            model.train()
             for src_batch, tgt_batch in batch_gen:
-                model.train()
-                loss = self.train_supervised_batch(model, src_batch, tgt_batch)
-                loss_total += loss
+                loss_total += self.train_supervised_batch(model, src_batch, tgt_batch)
                 if epoch % save_every == 0 and epoch != 0:
-                    save_model(model, dummy_discriminator, self.main_optimizer, self.discriminator_optimizer,
+                    save_model(model, discriminator, self.main_optimizer, self.discriminator_optimizer,
                                save_file + "_supervised.pt")
                 if epoch % print_every == 0 and epoch != 0:
                     print_loss_avg = loss_total / print_every
@@ -228,11 +228,11 @@ class Trainer:
                     print('%s big epoch, %s epoch, %s sec, %.4f main loss' %
                           (big_epoch, epoch, diff, print_loss_avg))
                 epoch += 1
-            save_model(model, dummy_discriminator, self.main_optimizer, self.discriminator_optimizer,
+            save_model(model,discriminator, self.main_optimizer, self.discriminator_optimizer,
                        save_file + "_supervised.pt")
 
     def train_supervised_batch(self, model: Seq2Seq, src_batch: Batch, tgt_batch: Batch):
-        src_reverted_batch, tgt_reverted_batch = Batch.sort_pair(tgt_batch, src_batch)
+        tgt_reverted_batch, src_reverted_batch = Batch.sort_pair(tgt_batch, src_batch)
         src_batch = src_batch.cuda() if self.use_cuda else src_batch
         tgt_batch = tgt_batch.cuda() if self.use_cuda else tgt_batch
         src_reverted_batch = src_reverted_batch.cuda() if self.use_cuda else src_reverted_batch
@@ -248,18 +248,13 @@ class Trainer:
         for key in gtruth_batches:
             sos_indices[key] = self.vocabulary.get_sos(key[-3:])
         self.main_optimizer.zero_grad()
-
-        results = dict()
-        for key in gtruth_batches:
-            input_batch = input_batches[key]
-            sos_index = sos_indices[key]
-            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index)
-
-        main_loss_computer = MainLossCompute(model.generator, self.vocabulary, self.use_cuda)
+        
         losses = []
-        for key, result in results.items():
-            main_loss = main_loss_computer.compute(result[1], gtruth_batches[key])
-            losses += [main_loss]
+        main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
+        for key in gtruth_batches:
+            _, output = model.forward(input_batches[key].variable, input_batches[key].lengths, sos_indices[key])
+            losses.append(main_loss_computer.compute(output, gtruth_batches[key].variable))
+
         loss = sum(losses)
         loss.backward()
         nn.utils.clip_grad_norm(model.parameters(), 5)
