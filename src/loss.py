@@ -1,8 +1,12 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Loss calculation.
+
 import torch
 import torch.nn as nn
 
 from utils.vocabulary import Vocabulary
-from src.models import Discriminator, Generator
+from src.models import Discriminator
 
 
 class DiscriminatorLossCompute:

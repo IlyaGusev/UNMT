@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Translation model. Interchangeable with word-by-word model.
+
 import torch
 from torch.autograd import Variable
 
@@ -5,15 +9,26 @@ from src.models import Seq2Seq
 from utils.vocabulary import Vocabulary
 
 
-class Translator:
-    def __init__(self, model:Seq2Seq, vocabulary: Vocabulary, use_cuda: bool):
+class TranslationModel:
+    def translate_sentence(self, sentence: str, from_lang: str, to_lang: str):
+        raise NotImplementedError()
+
+    def translate_to_tgt(self, variable: Variable, lengths: int):
+        raise NotImplementedError()
+
+    def translate_to_src(self, variable: Variable, lengths: int):
+        raise NotImplementedError()
+
+
+class Translator(TranslationModel):
+    def __init__(self, model: Seq2Seq, vocabulary: Vocabulary, use_cuda: bool):
         self.model = model  # type: Seq2Seq
         self.vocabulary = vocabulary  # type: Vocabulary
         self.use_cuda = use_cuda
 
-    def translate_sentence(self, sentence, src_lang, tgt_lang):
-        variable, lengths = self.sentence_to_variable(sentence, src_lang)
-        sos_index = self.vocabulary.get_sos(tgt_lang)
+    def translate_sentence(self, sentence: str, from_lang: str, to_lang: str):
+        variable, lengths = self.sentence_to_variable(sentence, from_lang)
+        sos_index = self.vocabulary.get_sos(to_lang)
 
         output_variable = self.translate(variable, lengths, sos_index)
 

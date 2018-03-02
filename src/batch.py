@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Batch creation.
+
 from typing import List, Tuple
 
 import torch
@@ -116,14 +120,16 @@ class BilingualBatchGenerator:
                     src_seqs.append(src_indices)
                     tgt_seqs.append(tgt_indices)
                     if len(src_seqs) == self.batch_size:
-                        yield Batch.sort_pair(self.process(src_seqs, self.languages[0]), self.process(tgt_seqs, self.languages[1]))
+                        yield Batch.sort_pair(self.process(src_seqs, self.languages[0]),
+                                              self.process(tgt_seqs, self.languages[1]))
                         batch_count += 1
                         if self.max_batch_count is not None and batch_count == self.max_batch_count:
                             return
                         src_seqs = []
                         tgt_seqs = []
             if len(src_seqs) == self.batch_size:
-                yield Batch.sort_pair(self.process(src_seqs, self.languages[0]), self.process(tgt_seqs, self.languages[1]))
+                yield Batch.sort_pair(self.process(src_seqs, self.languages[0]),
+                                      self.process(tgt_seqs, self.languages[1]))
     
     def process(self, sequences: List[List[int]], language: str):
         lengths = BatchGenerator.get_lengths(sequences)

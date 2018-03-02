@@ -1,5 +1,9 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Operations with batches.
+
 import numpy as np
-from typing import Tuple, Callable, List
+from typing import Callable, List
 
 import torch
 from torch.autograd import Variable
@@ -20,8 +24,9 @@ class BatchTransformer:
 
     @staticmethod
     def translate(batch: Batch, src_pad_index: int, tgt_pad_index: int, translation_func: Callable) -> Batch:
-        new_variable = translation_func(variable=batch.variable.transpose(0, 1),
-                                        lengths=BatchTransformer.get_lengths(batch.variable, src_pad_index))
+        variable = batch.variable.transpose(0, 1)
+        lengths = BatchTransformer.get_lengths(variable, src_pad_index)
+        new_variable = translation_func(variable=variable, lengths=lengths)
         new_lengths = BatchTransformer.get_lengths(new_variable, tgt_pad_index)
         new_variable = new_variable[:, :max(new_lengths)]
         new_batch = Batch(new_variable.transpose(0, 1), new_lengths)

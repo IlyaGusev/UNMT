@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Vocabulary with save/load support.
+
 from collections import Counter
 from typing import List, Tuple
 import pickle

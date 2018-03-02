@@ -1,8 +1,13 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Model save/load.
+
 import torch
 from torch import optim
 import logging
 
 from src.models import Seq2Seq, Discriminator, build_model
+
 
 def init_optimizers(model: Seq2Seq, discriminator: Discriminator,
                     discriminator_lr=0.0005, main_lr=0.0003, main_betas=(0.5, 0.999)):

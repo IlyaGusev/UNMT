@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: Model training.
+
 import time
 import logging
 from typing import List, Dict
@@ -12,9 +16,10 @@ from src.batch import Batch, BatchGenerator, BilingualBatchGenerator
 from src.batch_transformer import BatchTransformer
 from src.loss import DiscriminatorLossCompute, MainLossCompute
 from src.models import Seq2Seq, Discriminator
-from src.translator import Translator
+from src.translator import Translator, TranslationModel
 from src.serialize import save_model
 from utils.vocabulary import Vocabulary
+
 
 class Trainer:
     def __init__(self, vocabulary: Vocabulary, max_length: int=50, use_cuda: bool=True,
@@ -34,7 +39,7 @@ class Trainer:
         self.adv_ones_variable = None
         self.adv_zeros_variable = None
 
-        self.current_translation_model = None
+        self.current_translation_model = None  # type: TranslationModel
 
     def train(self, model: Seq2Seq, discriminator: Discriminator,
               src_file_names: List[str], tgt_file_names: List[str],
@@ -160,7 +165,7 @@ class Trainer:
         for key in input_batches:
             input_batch = input_batches[key]
             sos_index = sos_indices[key]
-            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index)
+            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index, gtruth_batches[key])
 
         main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         adv_loss_computer = DiscriminatorLossCompute(discriminator)

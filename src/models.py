@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Ilya Gusev
+# Description: PyTorch models
+
 import logging
 import numpy as np
 from gensim.models.keyedvectors import KeyedVectors
@@ -57,7 +61,8 @@ class Generator(nn.Module):
     def forward(self, inputs):
         assert inputs.size(1) == self.hidden_size
         return self.sm(self.out(inputs))
-    
+
+
 class DecoderRNN(nn.Module):
     def __init__(self, embedding_dim, hidden_size, output_size, max_length, n_layers=3, 
                  dropout=0.3, use_cuda=False, use_attention=True):
@@ -112,17 +117,21 @@ class DecoderRNN(nn.Module):
         initial_input = initial_input.cuda() if self.use_cuda else initial_input
         return initial_input
 
-    def forward(self, current_input, hidden, length, encoder_output):
+    def forward(self, current_input, hidden, length, encoder_output, gtruth=None):
         outputs = Variable(torch.zeros(length, current_input.size(0), self.output_size))
         outputs = outputs.cuda() if self.use_cuda else outputs
 
         for t in range(length):
             output, hidden = self.step(current_input, hidden, encoder_output)
-            scores = self.generator(output.squeeze(0))
-            top_indices = scores.topk(1, dim=1)[1].view(-1)
-            current_input = top_indices
+            scores = self.generator.forward(output.squeeze(0))
             outputs[t] = scores
+            if gtruth is None:
+                top_indices = scores.topk(1, dim=1)[1].view(-1)
+                current_input = top_indices
+            else:
+                current_input = gtruth[t]
         return outputs, hidden
+
 
 class Discriminator(nn.Module):
     def __init__(self, max_length, encoder_hidden_size, hidden_size, n_layers):
@@ -199,10 +208,11 @@ class Seq2Seq(nn.Module):
         self.encoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
         self.decoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
 
-    def forward(self, variable, lengths, sos_index):
+    def forward(self, variable, lengths, sos_index, gtruth=None):
         encoder_output, encoder_hidden = self.encoder.forward(variable, lengths)
         current_input = self.decoder.init_state(variable.size(1), sos_index)
-        decoder_output, _ = self.decoder.forward(current_input, encoder_hidden, self.max_length, encoder_output)
+        decoder_output, _ = self.decoder.forward(current_input, encoder_hidden, self.max_length,
+                                                 encoder_output, gtruth)
 
         return encoder_output, decoder_output
 

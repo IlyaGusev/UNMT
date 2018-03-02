@@ -5,9 +5,6 @@ from tqdm import tqdm
 
 @contextmanager
 def tqdm_open(filename, encoding='utf8'):
-    """
-    Открытие файла, обёрнутое в tqdm
-    """
     total = getsize(filename)
 
     def wrapped_line_iterator(fd):
