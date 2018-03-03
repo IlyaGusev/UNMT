@@ -44,7 +44,7 @@ class BatchTransformer:
             sequence = variable[b]
             sequence = sequence[sequence != pad_index]
             sequence, reminder = sequence[:-1], sequence[-1:]
-            if sequence:
+            if len(sequence) != 0:
                 sequence = sequence[np.random.random_sample(len(sequence)) > drop_probability]
                 sequence = [x for _, x in sorted(enumerate(sequence), key=perm)]
             sequence = np.concatenate((sequence, reminder), axis=0)

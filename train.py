@@ -151,7 +151,7 @@ def init_zero_model(vocabulary, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=
             decoder_n_layers=opt.layers,
             dropout=0.3,
             use_cuda=use_cuda,
-            enable_embedding_training=False,
+            enable_embedding_training=True,
             discriminator_hidden_size=8)
         if opt.src_embeddings is not None:
             load_embeddings(model,

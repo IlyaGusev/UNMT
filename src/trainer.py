@@ -32,7 +32,6 @@ class Trainer:
         self.main_lr = main_lr
         self.main_betas = main_betas
 
-        self.criterion = None
         self.discriminator_optimizer = None
         self.main_optimizer = None
 
@@ -165,7 +164,7 @@ class Trainer:
         for key in input_batches:
             input_batch = input_batches[key]
             sos_index = sos_indices[key]
-            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index, gtruth_batches[key])
+            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index)
 
         main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         adv_loss_computer = DiscriminatorLossCompute(discriminator)
@@ -200,8 +199,8 @@ class Trainer:
         self.discriminator_optimizer.step()
         return discriminator_loss.data[0]
 
-    def train_supervised(self, model, discriminator, pair_file_names, vocabulary: Vocabulary, *, batch_size, big_epochs, max_len,
-                         max_batch_count=None, save_every=100, print_every=100, save_file="model"):
+    def train_supervised(self, model, discriminator, pair_file_names, vocabulary: Vocabulary, *, batch_size, 
+                         big_epochs, max_len, max_batch_count=None, save_every=100, print_every=100, save_file="model"):
         if self.main_optimizer is None:
             logging.info("Initializing optimizers...")
             self.main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
@@ -210,9 +209,6 @@ class Trainer:
         for big_epoch in range(big_epochs):
             batch_gen = BilingualBatchGenerator(pair_file_names, batch_size, max_len, vocabulary,
                                                 languages=["src", "tgt"], max_batch_count=max_batch_count)
-            src_batch, tgt_batch = next(iter(batch_gen))
-            logging.debug("Src batch: " + str(src_batch))
-            logging.debug("Tgt batch: " + str(tgt_batch))
             src_batch, tgt_batch = next(iter(batch_gen))
             logging.debug("Src batch: " + str(src_batch))
             logging.debug("Tgt batch: " + str(tgt_batch))
@@ -257,7 +253,8 @@ class Trainer:
         losses = []
         main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         for key in gtruth_batches:
-            _, output = model.forward(input_batches[key].variable, input_batches[key].lengths, sos_indices[key])
+            _, output = model.forward(input_batches[key].variable, input_batches[key].lengths, 
+                                      sos_indices[key], gtruth_batches[key].variable)
             losses.append(main_loss_computer.compute(output, gtruth_batches[key].variable))
 
         loss = sum(losses)

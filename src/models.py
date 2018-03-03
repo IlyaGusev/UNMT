@@ -118,7 +118,7 @@ class DecoderRNN(nn.Module):
         return initial_input
 
     def forward(self, current_input, hidden, length, encoder_output, gtruth=None):
-        outputs = Variable(torch.zeros(length, current_input.size(0), self.output_size))
+        outputs = Variable(torch.zeros(length, current_input.size(0), self.output_size), requires_grad=False)
         outputs = outputs.cuda() if self.use_cuda else outputs
 
         for t in range(length):
@@ -211,7 +211,10 @@ class Seq2Seq(nn.Module):
     def forward(self, variable, lengths, sos_index, gtruth=None):
         encoder_output, encoder_hidden = self.encoder.forward(variable, lengths)
         current_input = self.decoder.init_state(variable.size(1), sos_index)
-        decoder_output, _ = self.decoder.forward(current_input, encoder_hidden, self.max_length,
+        max_length = self.max_length
+        if gtruth is not None:
+            max_length = min(self.max_length, gtruth.size(0))
+        decoder_output, _ = self.decoder.forward(current_input, encoder_hidden, max_length,
                                                  encoder_output, gtruth)
 
         return encoder_output, decoder_output
