@@ -42,9 +42,10 @@ class Trainer:
 
     def train(self, model: Seq2Seq, discriminator: Discriminator,
               src_file_names: List[str], tgt_file_names: List[str],
-              unsupervised_big_epochs: int, print_every=1000, save_every=1000,
-              batch_size: int=32, n_unsupervised_batches: int=None, save_file: str="model",
-              enable_unsupervised_backtranslation=False, max_len: int=50):
+              unsupervised_big_epochs: int, print_every: int, save_every: int,
+              batch_size: int, max_length: int, teacher_forcing: bool,
+              save_file: str="model", n_unsupervised_batches: int=None,
+              enable_unsupervised_backtranslation: bool=False):
         if self.main_optimizer is None or self.discriminator_optimizer is None:
             logging.info("Initializing optimizers...")
             self.main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=self.main_lr, betas=self.main_betas)
@@ -55,10 +56,10 @@ class Trainer:
         self.adv_zeros_variable = self.adv_zeros_variable.cuda() if self.use_cuda else self.adv_zeros_variable
 
         for big_epoch in range(unsupervised_big_epochs):
-            src_batch_gen = BatchGenerator(src_file_names, batch_size, max_len=max_len,
+            src_batch_gen = BatchGenerator(src_file_names, batch_size, max_len=max_length,
                                            vocabulary=self.vocabulary, language="src",
                                            max_batch_count=n_unsupervised_batches)
-            tgt_batch_gen = BatchGenerator(tgt_file_names, batch_size, max_len=max_len,
+            tgt_batch_gen = BatchGenerator(tgt_file_names, batch_size, max_len=max_length,
                                            vocabulary=self.vocabulary, language="tgt",
                                            max_batch_count=n_unsupervised_batches)
             logging.debug("Src batch:", next(iter(src_batch_gen)))
@@ -69,8 +70,8 @@ class Trainer:
             epoch = 0
             for src_batch, tgt_batch in zip(src_batch_gen, tgt_batch_gen):
                 model.train()
-                discriminator_loss, losses = self.train_batch(model, discriminator, src_batch, tgt_batch)
-
+                discriminator_loss, losses = self.train_batch(model, discriminator, src_batch,
+                                                              tgt_batch, teacher_forcing)
                 main_loss = sum(losses)
                 main_loss_total += main_loss
                 discriminator_loss_total += discriminator_loss
@@ -97,7 +98,8 @@ class Trainer:
                 self.current_translation_model = Translator(model, self.vocabulary, self.use_cuda)
                 model = copy.deepcopy(model)
 
-    def train_batch(self, model: Seq2Seq, discriminator: Discriminator, src_batch: Batch, tgt_batch: Batch):
+    def train_batch(self, model: Seq2Seq, discriminator: Discriminator, src_batch: Batch,
+                    tgt_batch: Batch, teacher_forcing: bool):
         src_batch = src_batch.cuda() if self.use_cuda else src_batch
         tgt_batch = tgt_batch.cuda() if self.use_cuda else tgt_batch
 
@@ -150,13 +152,14 @@ class Trainer:
         for key in gtruth_batches:
             sos_indices[key] = self.vocabulary.get_sos(key[-3:])
 
-        main_losses = self.main_step(model, discriminator, input_batches, gtruth_batches, adv_targets, sos_indices)
+        main_losses = self.main_step(model, discriminator, input_batches, gtruth_batches, adv_targets,
+                                     sos_indices, teacher_forcing)
 
         return discriminator_loss, main_losses
 
     def main_step(self, model: Seq2Seq, discriminator: Discriminator,
                   input_batches: Dict[str, Batch], gtruth_batches: Dict[str, Batch],
-                  adv_targets: Dict[str, Variable], sos_indices: Dict[str, int]):
+                  adv_targets: Dict[str, Variable], sos_indices: Dict[str, int], teacher_forcing: bool):
         model.train()
         discriminator.eval()
         self.main_optimizer.zero_grad()
@@ -164,7 +167,10 @@ class Trainer:
         for key in input_batches:
             input_batch = input_batches[key]
             sos_index = sos_indices[key]
-            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index)
+            gtruth_variable = None
+            if teacher_forcing:
+                gtruth_variable = gtruth_batches[key].variable
+            results[key] = model.forward(input_batch.variable, input_batch.lengths, sos_index, gtruth_variable)
 
         main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         adv_loss_computer = DiscriminatorLossCompute(discriminator)
@@ -200,14 +206,15 @@ class Trainer:
         return discriminator_loss.data[0]
 
     def train_supervised(self, model, discriminator, pair_file_names, vocabulary: Vocabulary, *, batch_size, 
-                         big_epochs, max_len, max_batch_count=None, save_every=100, print_every=100, save_file="model"):
+                         big_epochs, max_length, max_batch_count=None, save_every=100, print_every=100,
+                         save_file="model"):
         if self.main_optimizer is None:
             logging.info("Initializing optimizers...")
             self.main_optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
                                              lr=self.main_lr, betas=self.main_betas)
             self.discriminator_optimizer = optim.RMSprop(discriminator.parameters(), lr=self.discriminator_lr)
         for big_epoch in range(big_epochs):
-            batch_gen = BilingualBatchGenerator(pair_file_names, batch_size, max_len, vocabulary,
+            batch_gen = BilingualBatchGenerator(pair_file_names, batch_size, max_length, vocabulary,
                                                 languages=["src", "tgt"], max_batch_count=max_batch_count)
             src_batch, tgt_batch = next(iter(batch_gen))
             logging.debug("Src batch: " + str(src_batch))
@@ -229,10 +236,10 @@ class Trainer:
                     print('%s big epoch, %s epoch, %s sec, %.4f main loss' %
                           (big_epoch, epoch, diff, print_loss_avg))
                 epoch += 1
-            save_model(model,discriminator, self.main_optimizer, self.discriminator_optimizer,
+            save_model(model, discriminator, self.main_optimizer, self.discriminator_optimizer,
                        save_file + "_supervised.pt")
 
-    def train_supervised_batch(self, model: Seq2Seq, src_batch: Batch, tgt_batch: Batch):
+    def train_supervised_batch(self, model: Seq2Seq, src_batch: Batch, tgt_batch: Batch, teacher_forcing=True):
         tgt_reverted_batch, src_reverted_batch = Batch.sort_pair(tgt_batch, src_batch)
         src_batch = src_batch.cuda() if self.use_cuda else src_batch
         tgt_batch = tgt_batch.cuda() if self.use_cuda else tgt_batch
@@ -253,9 +260,12 @@ class Trainer:
         losses = []
         main_loss_computer = MainLossCompute(self.vocabulary, self.use_cuda)
         for key in gtruth_batches:
-            _, output = model.forward(input_batches[key].variable, input_batches[key].lengths, 
-                                      sos_indices[key], gtruth_batches[key].variable)
-            losses.append(main_loss_computer.compute(output, gtruth_batches[key].variable))
+            gtruth_variable = None
+            if teacher_forcing:
+                gtruth_variable = gtruth_batches[key].variable
+            _, output = model.forward(input_batches[key].variable, input_batches[key].lengths,
+                                      sos_indices[key], gtruth_variable)
+            losses.append(main_loss_computer.compute(output, gtruth_variable))
 
         loss = sum(losses)
         loss.backward()

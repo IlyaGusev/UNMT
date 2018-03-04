@@ -221,7 +221,7 @@ class Seq2Seq(nn.Module):
 
 
 def build_model(*, rnn_size, output_size, encoder_n_layers, decoder_n_layers, discriminator_hidden_size, dropout,
-                max_length, use_cuda, enable_embedding_training):
+                max_length, use_cuda, enable_embedding_training, use_attention, bidirectional):
     logging.info("Building model...")
     model = Seq2Seq(embedding_dim=300,
                     rnn_size=rnn_size,
@@ -232,7 +232,8 @@ def build_model(*, rnn_size, output_size, encoder_n_layers, decoder_n_layers, di
                     enable_embedding_training=enable_embedding_training,
                     max_length=max_length,
                     dropout=dropout,
-                    bidirectional=True)
+                    bidirectional=bidirectional,
+                    use_attention=use_attention)
     discriminator = Discriminator(max_length=max_length,
                                   encoder_hidden_size=rnn_size,
                                   hidden_size=discriminator_hidden_size,

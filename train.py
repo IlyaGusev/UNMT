@@ -45,6 +45,8 @@ def train_opts(parser):
                        help="Count of parallel/reverted batches to process")
     group.add_argument('-enable_unsupervised_backtranslation', type=bool, default=False,
                        help="Enable unsupervised backtranslation")
+    group.add_argument('-max_length', type=int, default=50,
+                       help="Sentence max length")
 
     # Embedding Options
     group = parser.add_argument_group('Embeddings')
@@ -52,8 +54,10 @@ def train_opts(parser):
                        help='Pretrained word embeddings for src language.')
     group.add_argument('-tgt_embeddings', type=str, default=None,
                        help='Pretrained word embeddings for tgt language.')
-    group.add_argument('-enable_embedding_training', type=int, default=0,
-                       help='Enable embedding training.')
+    group.add_argument('-usv_embedding_training', type=int, default=1,
+                       help='Enable embedding training in unsupervised model.')
+    group.add_argument('-sv_embedding_training', type=int, default=0,
+                       help='Enable embedding training in supervised model.')
 
     # Zero Model Options
     group = parser.add_argument_group('Zero Model')
@@ -70,8 +74,14 @@ def train_opts(parser):
                        help='Number of layers in enc/dec.')
     group.add_argument('-rnn_size', type=int, default=300,
                        help='Size of rnn hidden states')
+    group.add_argument('-dropout', type=float, default=0.3,
+                       help='Dropout rate')
     group.add_argument('-discriminator_hidden_size', type=int, default=1024,
                        help='Size of discriminator hidden layers')
+    group.add_argument('-attention', type=int, default=1,
+                       help='Enable attention')
+    group.add_argument('-bidirectional', type=int, default=1,
+                       help='Enable bidirectional encoder')
 
     # Dictionary options, for text corpus
     group = parser.add_argument_group('Vocab')
@@ -112,6 +122,8 @@ def train_opts(parser):
                        the literature, seemingly giving good results,
                        so we would discourage changing this value from
                        the default without due consideration.""")
+    group.add_argument('-teacher_forcing', type=int, default=1,
+                       help='Enable teacher forcing')
 
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')
@@ -130,52 +142,43 @@ train_opts(parser)
 opt = parser.parse_args()
 
 
-def init_zero_model(vocabulary, use_cuda, src_to_tgt_dict=None, tgt_to_src_dict=None,
-                    bootstrapped_model_path=None, train_src_bi=None, train_tgt_bi=None, supervised_epochs=5,
-                    batch_size=32, n_supervised_batches=None, print_every=1000, save_every=1000,
-                    save_file: str="model", max_length=50):
-    if src_to_tgt_dict is not None and tgt_to_src_dict is not None:
-        zero_model = WordByWordModel(src_to_tgt_dict_filename=opt.src_to_tgt_dict,
-                                     tgt_to_src_dict_filename=opt.tgt_to_src_dict,
-                                     all_vocabulary=vocabulary, max_length=max_length)
-    elif bootstrapped_model_path is not None:
-        zero_model, discriminator, _, _ = load_model(bootstrapped_model_path, use_cuda)
-        for param in zero_model.parameters():
-            param.requires_grad = False
-    elif train_src_bi is not None and train_tgt_bi is not None:
-        model, discriminator = build_model(
-            max_length=50,
-            output_size=vocabulary.size(),
-            rnn_size=opt.rnn_size,
-            encoder_n_layers=opt.layers,
-            decoder_n_layers=opt.layers,
-            dropout=0.3,
-            use_cuda=use_cuda,
-            enable_embedding_training=True,
-            discriminator_hidden_size=8)
-        if opt.src_embeddings is not None:
-            load_embeddings(model,
-                            src_embeddings_filename=opt.src_embeddings,
-                            tgt_embeddings_filename=opt.tgt_embeddings,
-                            vocabulary=vocabulary)
-        model = model.cuda() if use_cuda else model
-        discriminator = discriminator.cuda() if use_cuda else discriminator
-        print_summary(model)
+def init_zero_supervised(vocabulary, save_file, use_cuda):
+    model, discriminator = build_model(
+        max_length=opt.max_length,
+        output_size=vocabulary.size(),
+        rnn_size=opt.rnn_size,
+        encoder_n_layers=opt.layers,
+        decoder_n_layers=opt.layers,
+        dropout=opt.dropout,
+        use_cuda=use_cuda,
+        enable_embedding_training=bool(opt.sv_embedding_training),
+        discriminator_hidden_size=opt.discriminator_hidden_size,
+        bidirectional=bool(opt.bidirectional),
+        use_attention=bool(opt.attention)
+    )
+    if opt.src_embeddings is not None:
+        load_embeddings(model,
+                        src_embeddings_filename=opt.src_embeddings,
+                        tgt_embeddings_filename=opt.tgt_embeddings,
+                        vocabulary=vocabulary)
+    model = model.cuda() if use_cuda else model
+    discriminator = discriminator.cuda() if use_cuda else discriminator
+    print_summary(model)
 
-        trainer = Trainer(vocabulary,
-                          max_length=50,
-                          use_cuda=use_cuda,
-                          discriminator_lr=opt.discriminator_lr,
-                          main_lr=opt.learning_rate,
-                          main_betas=(opt.adam_beta1, 0.999), )
-        pair_file_names = [(train_src_bi, train_tgt_bi), ]
-        trainer.train_supervised(model, discriminator, pair_file_names, vocabulary, batch_size=batch_size, max_len=max_length,
-                                 save_file=save_file, big_epochs=supervised_epochs, print_every=print_every,
-                                 save_every=save_every, max_batch_count=n_supervised_batches)
-        zero_model = Translator(model, vocabulary, use_cuda)
-    else:
-        raise ValueError('Zero Model was not initialized')
-    return zero_model
+    trainer = Trainer(vocabulary,
+                      max_length=opt.max_length,
+                      use_cuda=use_cuda,
+                      discriminator_lr=opt.discriminator_lr,
+                      main_lr=opt.learning_rate,
+                      main_betas=(opt.adam_beta1, 0.999), )
+    pair_file_names = [(opt.train_src_bi, opt.train_tgt_bi), ]
+    trainer.train_supervised(model, discriminator, pair_file_names, vocabulary, batch_size=opt.batch_size,
+                             max_length=opt.max_length,
+                             save_file=save_file, big_epochs=opt.supervised_epochs, print_every=opt.print_every,
+                             save_every=opt.save_every, max_batch_count=opt.n_supervised_batches)
+    for param in model.parameters():
+        param.requires_grad = False
+    return Translator(model, vocabulary, use_cuda)
 
 
 def main():
@@ -192,22 +195,21 @@ def main():
             src_max_words=opt.src_vocab_size,
             tgt_max_words=opt.tgt_vocab_size,
             reset=bool(opt.reset_vocabularies))
-    
-    zero_model = init_zero_model(vocabulary, use_cuda,
-                                 src_to_tgt_dict=opt.src_to_tgt_dict,
-                                 tgt_to_src_dict=opt.tgt_to_src_dict,
-                                 bootstrapped_model_path=opt.bootstrapped_model,
-                                 train_src_bi=opt.train_src_bi,
-                                 train_tgt_bi=opt.train_tgt_bi,
-                                 supervised_epochs=opt.supervised_epochs,
-                                 batch_size=opt.batch_size,
-                                 n_supervised_batches=opt.n_supervised_batches,
-                                 print_every=opt.print_every,
-                                 save_every=opt.save_every,
-                                 save_file=opt.save_model)
+
+    if opt.src_to_tgt_dict is not None and opt.tgt_to_src_dict is not None:
+        zero_model = WordByWordModel(opt.src_to_tgt_dict, opt.tgt_to_src_dict, vocabulary, opt.max_length)
+    elif opt.bootstrapped_model is not None:
+        model, discriminator, _, _ = load_model(opt.bootstrapped_model, use_cuda)
+        for param in model.parameters():
+            param.requires_grad = False
+        zero_model = Translator(model, vocabulary, use_cuda)
+    elif opt.train_src_bi is not None and opt.train_tgt_bi is not None:
+        zero_model = init_zero_supervised(vocabulary, opt.save_model, use_cuda)
+    else:
+        assert False, "Zero model was not initialized"
     
     trainer = Trainer(vocabulary,
-                      max_length=50,
+                      max_length=opt.max_length,
                       use_cuda=use_cuda,
                       discriminator_lr=opt.discriminator_lr,
                       main_lr=opt.learning_rate,
@@ -215,15 +217,18 @@ def main():
     trainer.current_translation_model = zero_model
 
     model, discriminator = build_model(
-        max_length=50,
+        max_length=opt.max_length,
         output_size=vocabulary.size(),
         rnn_size=opt.rnn_size,
         encoder_n_layers=opt.layers,
         decoder_n_layers=opt.layers,
-        dropout=0.3,
+        dropout=opt.dropout,
         use_cuda=use_cuda,
-        enable_embedding_training=bool(opt.enable_embedding_training),
-        discriminator_hidden_size=opt.discriminator_hidden_size)
+        enable_embedding_training=bool(opt.usv_embedding_training),
+        discriminator_hidden_size=opt.discriminator_hidden_size,
+        bidirectional=bool(opt.bidirectional),
+        use_attention=bool(opt.attention)
+    )
     if opt.src_embeddings is not None:
         load_embeddings(model,
                         src_embeddings_filename=opt.src_embeddings,
@@ -248,7 +253,9 @@ def main():
                   save_every=opt.save_every,
                   save_file=opt.save_model,
                   n_unsupervised_batches=opt.n_unsupervised_batches,
-                  enable_unsupervised_backtranslation=opt.enable_unsupervised_backtranslation)
+                  enable_unsupervised_backtranslation=opt.enable_unsupervised_backtranslation,
+                  teacher_forcing=bool(opt.teacher_forcing),
+                  max_length=opt.max_length)
 
 
 if __name__ == "__main__":
