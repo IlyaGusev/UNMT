@@ -40,6 +40,10 @@ class Vocabulary:
             self.index2word.append(word)
         else:
             self.word2count[word] += 1
+    
+    def has_word(self, word, language) -> bool:
+        word = language+"-"+word
+        return word in self.word2index
 
     def add_file(self, filename: str, language: str):
         with open(filename, "r", encoding="utf-8") as r:

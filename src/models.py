@@ -15,6 +15,8 @@ from torch.nn.utils.rnn import pad_packed_sequence as unpack
 
 from utils.vocabulary import Vocabulary
 
+logger = logging.getLogger("unmt")
+
 
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, embedding_dim, hidden_size, n_layers=3, dropout=0.3, bidirectional=True):
@@ -158,9 +160,8 @@ class Discriminator(nn.Module):
         output = encoder_output.transpose(0, 1).contiguous().view(batch_size, max_length * self.encoder_hidden_size)
         output = F.pad(output, (0, (self.max_length - max_length) * self.encoder_hidden_size), "constant", 0)
         # S = batch_size, max_length * encoder_hidden_size
-        for i in range(self.n_layers):
+        for i in range(len(self.layers)):
             output = self.layers[i](output)
-            output = self.activation(output)
         return self.sigmoid(self.out(output))
 
 
@@ -199,10 +200,17 @@ class Seq2Seq(nn.Module):
             if language == "src" and word in src_embeddings.wv:
                 aligned_embeddings[i] = torch.FloatTensor(src_embeddings.wv[word])
                 found_count += 1
+            elif language == "src" and word.lower() in src_embeddings.wv:
+                aligned_embeddings[i] = torch.FloatTensor(src_embeddings.wv[word.lower()])
+                found_count += 1
+                
             if language == "tgt" and word in tgt_embeddings.wv:
                 aligned_embeddings[i] = torch.FloatTensor(tgt_embeddings.wv[word])
                 found_count += 1
-        logging.info("Embeddings filled: " + str(found_count) + " of " + str(vocabulary.size()))
+            elif language == "tgt" and word.lower() in tgt_embeddings.wv:
+                aligned_embeddings[i] = torch.FloatTensor(tgt_embeddings.wv[word.lower()])
+                found_count += 1
+        logger.info("Embeddings filled: " + str(found_count) + " of " + str(vocabulary.size()))
 
         enable_training = self.encoder.embedding.weight.requires_grad
         self.encoder.embedding.weight = nn.Parameter(aligned_embeddings, requires_grad=enable_training)
@@ -222,7 +230,7 @@ class Seq2Seq(nn.Module):
 
 def build_model(*, rnn_size, output_size, encoder_n_layers, decoder_n_layers, discriminator_hidden_size, dropout,
                 max_length, use_cuda, enable_embedding_training, use_attention, bidirectional):
-    logging.info("Building model...")
+    logger.info("Building model...")
     model = Seq2Seq(embedding_dim=300,
                     rnn_size=rnn_size,
                     output_size=output_size,
@@ -242,14 +250,14 @@ def build_model(*, rnn_size, output_size, encoder_n_layers, decoder_n_layers, di
 
 
 def load_embeddings(model, src_embeddings_filename, tgt_embeddings_filename, vocabulary):
-    logging.info("Loading embeddings...")
+    logger.info("Loading embeddings...")
     src_word_vectors = KeyedVectors.load_word2vec_format(src_embeddings_filename, binary=False)
     tgt_word_vectors = KeyedVectors.load_word2vec_format(tgt_embeddings_filename, binary=False)
     model.load_embeddings(src_word_vectors, tgt_word_vectors, vocabulary)
 
 
 def print_summary(model):
-    logging.info(model)
+    logger.info(model)
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     params = sum([np.prod(p.size()) for p in model_parameters])
-    logging.info("Params: " + str(params))
+    logger.info("Params: " + str(params))

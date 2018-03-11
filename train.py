@@ -14,13 +14,6 @@ from src.serialize import load_model
 
 
 def train_opts(parser):
-    # Languages Options
-    group = parser.add_argument_group('Languages')
-    group.add_argument('-src_lang', type=str, required=True,
-                       help='Src language.')
-    group.add_argument('-tgt_lang', type=str, required=True,
-                       help='Tgt language.')
-
     # Data options
     group = parser.add_argument_group('Data')
     group.add_argument('-src_vocabulary', default="src.pickle",
@@ -101,17 +94,23 @@ def train_opts(parser):
     group.add_argument('-seed', type=int, default=1337,
                        help="""Random seed used for the experiments
                        reproducibility.""")
-    group.add_argument('-load_from', default=None, type=str,
-                       help="Load from file")
+    group.add_argument('-usv_load_from', default=None, type=str,
+                       help="Load unsupervised model from file")
+    group.add_argument('-sv_load_from', default=None, type=str,
+                       help="Load supervised model from file")
     # Logging
     group = parser.add_argument_group('Logging')
     group.add_argument('-print_every', type=int, default=1000,
                        help='Count of minibatches to print')
+    group.add_argument('-log_file', type=str, default="log.txt",
+                       help='Log file for debug messages')
 
     # Optimization options
     group = parser.add_argument_group('Optimization- Type')
-    group.add_argument('-batch_size', type=int, default=64,
-                       help='Maximum batch size for training')
+    group.add_argument('-sv_num_words_in_batch', type=int, default=500,
+                       help='Batch size in words for supervised training')
+    group.add_argument('-usv_num_words_in_batch', type=int, default=250,
+                       help='Batch size in words for unsupervised training')
     group.add_argument('-unsupervised_epochs', type=int, default=2,
                        help='Number of unsupervised training epochs')
     group.add_argument('-supervised_epochs', type=int, default=10,
@@ -127,6 +126,8 @@ def train_opts(parser):
 
     # learning rate
     group = parser.add_argument_group('Optimization- Rate')
+    group.add_argument('-sv_learning_rate', type=float, default=0.003,
+                       help="""Supervised training learning rate.""")
     group.add_argument('-learning_rate', type=float, default=0.0003,
                        help="""Main learning rate.""")
     group.add_argument('-discriminator_lr', type=float, default=0.0005,
@@ -164,27 +165,43 @@ def init_zero_supervised(vocabulary, save_file, use_cuda):
     model = model.cuda() if use_cuda else model
     discriminator = discriminator.cuda() if use_cuda else discriminator
     print_summary(model)
+    
 
     trainer = Trainer(vocabulary,
                       max_length=opt.max_length,
                       use_cuda=use_cuda,
                       discriminator_lr=opt.discriminator_lr,
-                      main_lr=opt.learning_rate,
+                      main_lr=opt.sv_learning_rate,
                       main_betas=(opt.adam_beta1, 0.999), )
+    
+    if opt.sv_load_from:
+        model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.sv_load_from, use_cuda)
+        trainer.main_optimizer = main_optimizer
+        trainer.discriminator_optimizer = discriminator_optimizer
+    
     pair_file_names = [(opt.train_src_bi, opt.train_tgt_bi), ]
-    trainer.train_supervised(model, discriminator, pair_file_names, vocabulary, batch_size=opt.batch_size,
-                             max_length=opt.max_length,
-                             save_file=save_file, big_epochs=opt.supervised_epochs, print_every=opt.print_every,
-                             save_every=opt.save_every, max_batch_count=opt.n_supervised_batches)
+    trainer.train_supervised(model, discriminator, pair_file_names, vocabulary, num_words_in_batch=opt.sv_num_words_in_batch,
+                             max_length=opt.max_length,save_file=save_file, big_epochs=opt.supervised_epochs, 
+                             print_every=opt.print_every, save_every=opt.save_every, max_batch_count=opt.n_supervised_batches)
     for param in model.parameters():
         param.requires_grad = False
     return Translator(model, vocabulary, use_cuda)
 
 
 def main():
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
+    
+    logger = logging.getLogger("unmt")
+    logger.propagate = False
+    fh = logging.FileHandler(opt.log_file)
+    fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    
     use_cuda = torch.cuda.is_available()
-    logging.info("Use CUDA: " + str(use_cuda))
+    logger.info("Use CUDA: " + str(use_cuda))
   
     _, _, vocabulary = collect_vocabularies(
             src_vocabulary_path=opt.src_vocabulary,
@@ -239,8 +256,8 @@ def main():
     print_summary(discriminator)
     discriminator = discriminator.cuda() if use_cuda else discriminator
 
-    if opt.load_from:
-        model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.load_from, use_cuda)
+    if opt.usv_load_from:
+        model, discriminator, main_optimizer, discriminator_optimizer = load_model(opt.usv_load_from, use_cuda)
         trainer.main_optimizer = main_optimizer
         trainer.discriminator_optimizer = discriminator_optimizer
 
@@ -248,7 +265,7 @@ def main():
                   src_file_names=[opt.train_src_mono, ],
                   tgt_file_names=[opt.train_tgt_mono, ],
                   unsupervised_big_epochs=opt.unsupervised_epochs,
-                  batch_size=opt.batch_size,
+                  num_words_in_batch=opt.usv_num_words_in_batch,
                   print_every=opt.print_every,
                   save_every=opt.save_every,
                   save_file=opt.save_model,

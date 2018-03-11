@@ -33,6 +33,7 @@ def save_model(model: Seq2Seq, discriminator: Discriminator, main_optimizer, dis
         'output_size': model.output_size,
         'embedding_dim': model.embedding_dim,
         'bidirectional': model.bidirectional,
+        'attention': model.use_attention,
         'max_length': model.max_length,
         'enable_embedding_training': model.enable_embedding_training,
 
@@ -55,7 +56,9 @@ def load_model(model_filename, use_cuda):
                                        discriminator_hidden_size=state_dict['discriminator_hidden_size'],
                                        max_length=state_dict['max_length'],
                                        enable_embedding_training=state_dict['enable_embedding_training'],
-                                       use_cuda=use_cuda)
+                                       use_cuda=use_cuda,
+                                       bidirectional=state_dict['bidirectional'],
+                                       use_attention=state_dict['attention'])
     model.load_state_dict(state_dict['model'])
     discriminator.load_state_dict(state_dict['discriminator'])
     model = model.cuda() if use_cuda else model

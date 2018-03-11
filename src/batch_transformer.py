@@ -23,22 +23,36 @@ class BatchTransformer:
         return new_batch
 
     @staticmethod
-    def translate(batch: Batch, src_pad_index: int, tgt_pad_index: int, translation_func: Callable) -> Batch:
-        variable = batch.variable.transpose(0, 1)
-        lengths = BatchTransformer.get_lengths(variable, src_pad_index)
-        new_variable = translation_func(variable=variable, lengths=lengths)
-        new_lengths = BatchTransformer.get_lengths(new_variable, tgt_pad_index)
-        new_variable = new_variable[:, :max(new_lengths)]
-        new_batch = Batch(new_variable.transpose(0, 1), new_lengths)
-        return new_batch
+    def translate(batch: Batch, src_pad_index: int, tgt_pad_index: int, tgt_eos_index: int,
+                  translation_func: Callable) -> Batch:
+        new_variable = translation_func(variable=batch.variable, lengths=batch.lengths)
+           
+        max_length = new_variable.size(0)
+        batch_size = new_variable.size(1)
+        for b in range(batch_size):
+            sentence = []
+            for t in range(max_length):
+                word_index = new_variable[t, b].data[0]
+                sentence.append(word_index)
+                if word_index == tgt_eos_index:
+                    break
+            if len(sentence) != 0:
+                new_variable[:len(sentence), b] = torch.LongTensor(sentence)
+            if len(sentence) != max_length:
+                new_variable[len(sentence):, b] = torch.add(torch.zeros(max_length-len(sentence)), tgt_pad_index)
+
+        new_lengths = BatchTransformer.get_lengths(new_variable.transpose(0, 1), tgt_pad_index)
+        new_variable = new_variable[:max(new_lengths), :]
+        assert new_variable.size(1) == batch_size
+        return Batch(new_variable, new_lengths)
 
     @staticmethod
     def add_noise(variable: Variable, pad_index: int, drop_probability: float=0.1,
                   shuffle_max_distance: int=3) -> Variable:
         def perm(i):
             return i[0] + (shuffle_max_distance + 1) * np.random.random()
-
-        new_variable = Variable(torch.zeros(variable.size(0), variable.size(1)).type(torch.LongTensor))
+        
+        new_variable = np.zeros((variable.size(0), variable.size(1)), dtype='int')
         variable = variable.data.cpu().numpy()
         for b in range(variable.shape[0]):
             sequence = variable[b]
@@ -48,9 +62,10 @@ class BatchTransformer:
                 sequence = sequence[np.random.random_sample(len(sequence)) > drop_probability]
                 sequence = [x for _, x in sorted(enumerate(sequence), key=perm)]
             sequence = np.concatenate((sequence, reminder), axis=0)
-            sequence = np.pad(sequence, (0, variable.shape[1] - len(sequence)), 'constant', constant_values=pad_index)
-            new_variable[b] = sequence
-        return new_variable
+            sequence = list(np.pad(sequence, (0, variable.shape[1] - len(sequence)), 'constant',
+                                   constant_values=pad_index))
+            new_variable[b, :] = sequence
+        return Variable(torch.LongTensor(new_variable))
 
     @staticmethod
     def get_lengths(variable: Variable, pad_index: int) -> List[int]:
