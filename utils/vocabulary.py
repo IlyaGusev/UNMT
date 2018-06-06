@@ -6,6 +6,7 @@ from collections import Counter
 from typing import List, Tuple
 import pickle
 import logging
+import os
 
 
 class Vocabulary:
@@ -124,7 +125,7 @@ def collect_vocabularies(src_vocabulary_path: str, tgt_vocabulary_path: str, all
     tgt_vocabulary = Vocabulary(languages=["tgt"])
     vocabulary = Vocabulary(languages=["src", "tgt"])
 
-    if not reset:
+    if not reset and os.path.exists(src_vocabulary_path):
         src_vocabulary.load(src_vocabulary_path)
         tgt_vocabulary.load(tgt_vocabulary_path)
         vocabulary.load(all_vocabulary_path)
