@@ -124,11 +124,10 @@ def collect_vocabularies(src_vocabulary_path: str, tgt_vocabulary_path: str, all
     tgt_vocabulary = Vocabulary(languages=["tgt"])
     vocabulary = Vocabulary(languages=["src", "tgt"])
 
-    src_vocabulary.load(src_vocabulary_path)
-    tgt_vocabulary.load(tgt_vocabulary_path)
-    vocabulary.load(all_vocabulary_path)
-
     if not reset:
+        src_vocabulary.load(src_vocabulary_path)
+        tgt_vocabulary.load(tgt_vocabulary_path)
+        vocabulary.load(all_vocabulary_path)
         return src_vocabulary, tgt_vocabulary, vocabulary
 
     assert len(src_file_names) != 0 and len(tgt_file_names) != 0
